@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 从 targetSdk 28 起默认禁止明文 HTTP。而兰大教务系统在 CAS 票据校验这一步
+  会把浏览器重定向到**明文 http**：
+      http://jwk.lzu.edu.cn/academic/login/lzu/loginLds6Valid.jsp?ticket=ST-...
+  不放行就会报 net:ERR_CLEARTEXT_NOT_PERMITTED，会话建立不了、登录永远走不完。
+
+  这里**只对 jwk.lzu.edu.cn 放行**明文，其余域名仍强制 HTTPS（base-config 为 false）——
+  刻意保持最小放行面。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">jwk.lzu.edu.cn</domain>
+    </domain-config>
+</network-security-config>

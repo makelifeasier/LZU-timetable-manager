@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 极简图标：白底卡片 + 单色网格。小尺寸下一眼能认出是课表，不靠颜色堆信息。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 卡片 -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M30,28 L78,28 L78,80 L30,80 Z" />
+    <!-- 网格：1 竖 2 横 -->
+    <path android:fillColor="#FF1E6FD9" android:pathData="M52.5,28 L55.5,28 L55.5,80 L52.5,80 Z" />
+    <path android:fillColor="#FF1E6FD9" android:pathData="M30,45 L78,45 L78,48 L30,48 Z" />
+    <path android:fillColor="#FF1E6FD9" android:pathData="M30,61 L78,61 L78,64 L30,64 Z" />
+</vector>

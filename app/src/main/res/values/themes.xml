@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      刻意不用系统 ActionBar：
+      targetSdk 35+ 强制 edge-to-edge，系统 ActionBar 会压在页面顶部内容上，
+      导致横幅按钮点不到。自建顶栏 + Ui.applyEdgeToEdge 处理安全区更可控。
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/page_bg</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+
+    <!-- 卡片 -->
+    <style name="Card">
+        <item name="android:background">@drawable/bg_card</item>
+        <item name="android:orientation">vertical</item>
+    </style>
+
+    <!-- 胶囊文字按钮（替代系统默认灰按钮） -->
+    <style name="TextButton">
+        <item name="android:background">@drawable/bg_pill</item>
+        <item name="android:textColor">@color/accent</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingTop">11dp</item>
+        <item name="android:paddingBottom">11dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">16dp</item>
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+    </style>
+
+    <!-- 强调胶囊按钮（主操作） -->
+    <style name="TextButton.Accent">
+        <item name="android:background">@drawable/bg_accent_chip</item>
+    </style>
+
+    <!-- 区块小标题 -->
+    <style name="SectionTitle">
+        <item name="android:textSize">12sp</item>
+        <item name="android:textColor">@color/text_tertiary</item>
+        <item name="android:letterSpacing">0.06</item>
+    </style>
+</resources>

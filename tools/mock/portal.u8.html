@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>兰州大学教务系统（本地 mock 门户）</title></head>
+<body style="font-family:sans-serif">
+<h2>教务系统门户（本地 mock，模拟真实门户的结构）</h2>
+
+<h3>信息查询</h3>
+<ul>
+  <!-- 诱饵：教师课表，timetableType=TEACHER，自动发现不应选中它 -->
+  <li><a href="/academic/manager/coursearrange/showTimetable.do?id=999999&amp;yearid=99&amp;termid=1&amp;timetableType=TEACHER&amp;sectionType=BASE">教师课表（诱饵）</a></li>
+  <li><a href="/academic/index.jsp">系统首页</a></li>
+</ul>
+
+<!-- 模拟门户常见的 iframe 布局：真正的「学生课表」入口在框架里 -->
+<iframe id="menu" src="/frame.u8.html" width="420" height="160"></iframe>
+
+<script>
+  // 模拟「入口由 JS 拼出来、页面上没有 <a>、只有 HTML 源码里有」的情况。
+  // 若上面的 iframe 扫描失效，自动发现会退而选中这一条（id 不同，便于断言区分）。
+  var lazyEntry = '/academic/manager/coursearrange/showTimetable.do?id=888888&yearid=99&termid=1&timetableType=STUDENT&sectionType=BASE';
+  window.__lazyEntry = lazyEntry;
+</script>
+</body>
+</html>

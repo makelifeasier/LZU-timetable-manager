@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>教务系统门户（树形菜单 mock）</title></head>
+<body style="font-family:sans-serif">
+<h2>模拟真机上的失败形态</h2>
+<p>首屏 HTML 里<b>没有任何 showTimetable 字面量</b>（连脚本里也刻意拆开了），
+   必须先点开「信息查询」，才会生成「学生课表」这个入口 ——
+   这正是 v2.0 在真实教务系统上扫到「候选=0」的原因。</p>
+
+<div id="menu" style="cursor:pointer;border:1px solid #999;padding:8px;width:200px"
+     onclick="expandMenu()">信息查询</div>
+<div id="sub" style="margin-left:20px"></div>
+
+<script>
+function expandMenu() {
+  // 刻意把字符串拼出来：让「整页 HTML 文本扫描」这条路也扫不到
+  var p1 = 'show';
+  var p2 = 'Ti' + 'metable.do';
+  var q = '?id=777777&yearid=99&termid=1&timetableType=STUDENT&sectionType=BASE';
+  var url = '/academic/manager/coursearrange/' + p1 + p2 + q;
+  document.getElementById('sub').innerHTML = '<a href="' + url + '">学生课表</a>';
+}
+</script>
+</body>
+</html>

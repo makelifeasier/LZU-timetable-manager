@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">兰大课表</string>
+
+    <string name="action_login">重新登录</string>
+    <string name="action_sync">立即同步</string>
+    <string name="action_today">今日课程</string>
+    <string name="action_export">导出周课表图片</string>
+    <string name="action_settings">设置</string>
+    <string name="action_diagnostics">诊断</string>
+
+    <string name="login_title">登录并导入课表</string>
+    <string name="login_hint">请在下方完成统一身份认证登录（兰州大学APP扫码 或 账号密码+验证码 均可），登录成功后会自动导入课表。\n若提示「文件未找到」不用担心，会自动改走认证入口。</string>
+    <string name="login_success">导入成功</string>
+    <string name="login_failed">页面已加载，但没解析出课程，请点 ⋮ →「导入当前页面」或到「诊断」查看</string>
+
+    <string name="widget_label">今日课程</string>
+    <string name="widget_description">显示正在上、接下来或一整天的课</string>
+    <string name="widget_no_class">今天没有课 🎉</string>
+    <string name="widget_no_upcoming">接下来几天都没有课</string>
+    <string name="widget_switch_mode">切换「接下来 / 整天」</string>
+    <string name="widget_refresh">刷新</string>
+    <string name="widget_never_synced">点此登录并导入课表</string>
+</resources>

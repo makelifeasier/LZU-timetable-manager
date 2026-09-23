@@ -1,0 +1,91 @@
+# XcodeGen 工程描述：`brew install xcodegen && cd ios && xcodegen generate`
+#
+# 三个 target：
+#   LZUWidget      主 App（SwiftUI）
+#   TimetableWidget 桌面小组件（WidgetKit 扩展）
+#   LZUWidgetTests  单元测试（与 Android 版同一批断言）
+#
+# 上手先改 APP_ID / GROUP / TEAM 这三处。
+
+name: LZUWidget
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"          # WidgetKit 基础功能；App Intent 按钮需要 17.0
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # 想用小组件上的「切换模式」按钮，把下面这行改成 17.0
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    # 没把握就让 Xcode 自动签名；有 Team 就填上
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  LZUWidget:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+      - path: Shared
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: 兰大课表
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        # 允许访问校内明文 http（CAS 票据回跳那一步是明文，见 Android 版同名配置）
+        NSAppTransportSecurity:
+          NSExceptionDomains:
+            jwk.lzu.edu.cn:
+              NSExceptionAllowsInsecureHTTPLoads: true
+              NSIncludesSubdomains: true
+    entitlements:
+      path: App/LZUWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.example.timetable
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.timetable
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+    dependencies:
+      - target: TimetableWidget
+        embed: true
+
+  TimetableWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widget
+      - path: Shared
+    info:
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: 兰大课表
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Widget/TimetableWidget.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.example.timetable
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.timetable.widget
+
+  LZUWidgetTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+      - path: Shared
+    dependencies:
+      - target: LZUWidget

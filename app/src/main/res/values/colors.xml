@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 页面与容器 -->
+    <color name="page_bg">#FFFFFFFF</color>
+    <color name="surface">#FFFFFFFF</color>
+    <color name="surface_alt">#FFF5F7FA</color>
+    <color name="card">#FFFFFFFF</color>
+    <color name="card_stroke">#FFE4E7EC</color>
+    <color name="stroke">#FFE4E7EC</color>
+    <color name="hairline">#FFEEF0F3</color>
+
+    <!-- 文字三档 -->
+    <color name="text_primary">#FF101828</color>
+    <color name="text_secondary">#FF667085</color>
+    <color name="text_tertiary">#FF98A2B3</color>
+
+    <!-- 强调色：兰大蓝 -->
+    <color name="accent">#FF1E6FD9</color>
+    <color name="accent_soft">#FFE8F1FC</color>
+    <color name="accent_pressed">#FF1557AE</color>
+    <color name="ripple">#1F1E6FD9</color>
+
+    <!-- 提示条 -->
+    <color name="banner_bg">#FFFFF6E5</color>
+    <color name="banner_text">#FF8A5300</color>
+    <color name="banner_stroke">#FFF2DFB8</color>
+
+    <!-- 小组件 -->
+    <color name="widget_bg">#FFFFFFFF</color>
+    <color name="widget_row_bg">#FFF5F7FA</color>
+    <color name="widget_text">#FF101828</color>
+    <color name="widget_subtext">#FF667085</color>
+    <color name="widget_now">#FF1E6FD9</color>
+</resources>

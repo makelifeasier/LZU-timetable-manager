@@ -1,0 +1,15 @@
+# 行尾统一：仓库在 Windows 上初始化，但 CI 跑在 Linux/macOS 上。
+#
+# 关键一条是 `gradlew`：它是 **shell 脚本**，一旦带 CRLF 进仓库，
+# 在 ubuntu 运行器上会直接 `bad interpreter: /bin/sh^M` —— CI 第一次就红，
+# 而且报错信息完全看不出是行尾问题（已经踩过一次）。所以显式钉成 LF。
+* text=auto eol=lf
+
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.png  binary
+*.jpg  binary
+*.jar  binary
+*.jks  binary
+*.apk  binary
+*.xcresult binary

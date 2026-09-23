@@ -1,0 +1,49 @@
+# ---- 签名与凭据：绝不能进仓库 ----
+# 发布出去的密钥 + 密码 = 别人能签出「跟你同一个身份」的 APK，
+# Android 会把它当成你的应用正式更新来安装，且密钥无法吊销。
+keystore.properties
+*.jks
+*.keystore
+local.properties
+
+# ---- 本地验证产物：含你的真实课表与截图 ----
+# recon/ 里有原始课表页面、4 张课表截图、几十个 UI dump。
+# 这些能暴露你的学号/班级/课表，也没必要留在开源仓库里。
+recon/
+
+# 本地草稿目录（随便放什么都不会进仓库）。
+# 注意：端到端测试用的 mock 教务系统在 tools/mock/ —— **全合成数据，是要提交的**。
+serve/
+*.local.*
+
+# ---- 收款码：作者的真实身份信息，绝不上仓库 ----
+# 放上去等于把"这个项目是谁做的"写在 GitHub 门口，和「让项目中立一点」正好相反。
+# 文件只在本机存在，随 APK 一起打出去；别人 clone 源码构建则自动隐藏捐赠入口。
+# 想放自己的码：保存成 app/src/main/assets/donate_qr.png 再打包。
+app/src/main/assets/donate_qr.png
+app/src/main/assets/donate*_qr.png
+
+# ---- 构建产物 ----
+build/
+.gradle/
+.kotlin/
+*.apk
+*.aab
+captures/
+.cxx/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ---- iOS：XcodeGen 生成的工程文件不入库 ----
+# 工程由 ios/project.yml 生成（xcodegen generate），把 .xcodeproj 提交进去
+# 只会制造无意义的冲突。
+ios/*.xcodeproj/
+ios/*.xcworkspace/
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/

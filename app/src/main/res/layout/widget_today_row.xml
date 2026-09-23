@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  小组件列表的「一行」。
+
+  这一层刻意做成**固定 38dp 的外壳**：ListView 会用自己的 LayoutParams 覆盖列表项，
+  android:layout_margin 在 ListView 里是被忽略的，所以"行间距"必须靠外壳内部的
+  2dp 空白实现，而不是 margin —— 否则计算出的行高会比真实渲染多 2dp。
+
+  外壳 38dp = 卡片 36dp + 间距 2dp。列表高度（WidgetData.listHeightDp）
+  取的就是 38dp 的整数倍，行高固定后，底部**不可能**再切出半行。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/row_root"
+    android:layout_width="match_parent"
+    android:layout_height="38dp"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/row_card"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:layout_marginBottom="2dp"
+        android:background="@drawable/widget_row_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp">
+
+        <ImageView
+            android:id="@+id/row_dot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:layout_marginEnd="10dp"
+            android:contentDescription=""
+            android:src="@drawable/dot_white" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/row_name"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="@color/widget_text"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/row_place"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="@color/widget_subtext"
+                android:textSize="9sp" />
+        </LinearLayout>
+
+        <!--
+          右侧固定两行：上面是起止时间，下面是相对提示（"明天"/"还剩 25 分"/"正在上"）。
+          以前这两段合成一个 TextView，于是有的行 1 行、有的行 3 行，**同一列表里行高不一致**，
+          列表高度无论取多少都不可能是所有行高的整数倍 —— 必然露出半行。
+        -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:gravity="end"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/row_time"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="@color/widget_now"
+                android:textSize="11sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/row_hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:maxLines="1"
+                android:textColor="@color/widget_subtext"
+                android:textSize="9sp" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>

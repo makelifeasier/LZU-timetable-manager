@@ -1,0 +1,115 @@
+# 持续集成：**不用买 Mac 也能编译并测试 iOS 代码**
+#
+# GitHub 给公开仓库免费提供 macOS 运行器（Apple 官方机器 + Xcode）。
+# 每次 push 都会：
+#   · android 任务：在 ubuntu 上跑 Android 的单元测试
+#   · ios 任务：在 macOS 上生成 Xcode 工程并跑 XCTest
+#
+# 也就是说：iOS 那份「我从未编译过」的代码，靠这个工作流就能得到验证 ——
+# 如果 ios 任务报编译错误，把日志发我，我按报错修。
+#
+# 私有仓库也能用（有免费额度），但公开仓库完全免费。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  android:
+    name: Android 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: 配置 Gradle（带缓存）
+        uses: gradle/actions/setup-gradle@v4
+
+      # wrapper 已入库，无需本机 Gradle。
+      # 注意：仓库是在 Windows 上初始化的，gradlew 大概率没有可执行位，
+      # 直接跑会 Permission denied —— 所以先补上。
+      - name: 补 gradlew 可执行位
+        run: chmod +x gradlew
+
+      - name: 跑单测
+        run: ./gradlew testDebugUnitTest --console=plain
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  ios:
+    name: iOS 编译与单测（macOS 运行器）
+    runs-on: macos-14
+    # 这份 iOS 代码从未编译过，第一次跑**大概率是红的** —— 那正是我们要的信息（把日志发来逐个修）。
+    # 用 continue-on-error 让它单独红：不连累 android 任务，也不让仓库首页挂一个大红叉 ——
+    # 这里失败是"待办"，不是"项目坏了"。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 看看这台机器的 Xcode 与模拟器
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | head -30
+
+      - name: 安装 XcodeGen（工程由 project.yml 生成）
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        working-directory: ios
+        run: xcodegen generate
+
+      # 单测不需要签名；App Group 那类能力在模拟器上也不需要真实证书
+      - name: 跑 XCTest
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -scheme LZUWidget \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -resultBundlePath build/TestResults.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            | tail -120
+
+      - name: 上传测试结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results
+          path: ios/build/TestResults.xcresult
+          if-no-files-found: ignore
+
+      # 编不过也无所谓，但编过了就顺手产出一个**未签名**的构建：
+      # 等你有了 Apple 开发者账号（TestFlight / Ad Hoc），可以直接拿去签名分发。
+      # 分发方式对比见 ios/DISTRIBUTION.md。
+      - name: 产出未签名构建（Release / 真机）
+        if: success()
+        working-directory: ios
+        run: |
+          xcodebuild -scheme LZUWidget \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tail -40
+
+      - name: 上传未签名构建
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-unsigned-build
+          path: ios/build/DerivedData/Build/Products/Release-iphoneos/
+          if-no-files-found: ignore

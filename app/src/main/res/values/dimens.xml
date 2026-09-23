@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 8pt 间距栅格 -->
+    <dimen name="space_xs">4dp</dimen>
+    <dimen name="space_s">8dp</dimen>
+    <dimen name="space_m">12dp</dimen>
+    <dimen name="space_l">16dp</dimen>
+    <dimen name="space_xl">24dp</dimen>
+
+    <!-- 圆角 -->
+    <dimen name="radius_card">16dp</dimen>
+    <dimen name="radius_chip">10dp</dimen>
+    <dimen name="radius_pill">999dp</dimen>
+
+    <!-- 触摸目标 -->
+    <dimen name="touch_target">40dp</dimen>
+    <dimen name="touch_target_sm">32dp</dimen>
+</resources>

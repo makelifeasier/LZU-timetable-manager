@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  小组件声明。
+
+  minWidth / minHeight 决定**默认摆放多大**（也决定**能被缩到多小**），
+  而"一格"在不同系统上大小不一：
+  同样 150dp，OPPO 的格子大、按 2 行算，小米（MIUI/HyperOS）的格子小、按 3 行算 ——
+  所以小米上往下缩到 3×2 会被卡住。这里分成两组：
+    minWidth 150dp / minHeight 150dp         → 默认摆放 ≈ 4×3（与 targetCell* 一致）
+    minResizeWidth 150dp / minResizeHeight 90dp → 允许往下缩到 2 行、不再更小
+
+  **minHeight 必须给够（150dp 而不是 90dp）**：部分启动器（实测荣耀 MagicOS
+  这一族）回报的 OPTION_APPWIDGET_MIN_HEIGHT 不是"当前格子高度"，而是**我们声明的
+  minHeight 本身**。声明 90dp 时它就一直报 90dp → 只能算出 1 行课，下面留一大片空白
+  （真机反馈"小组件下方的空白过多，把课表遮住一半"）。
+  声明 150dp 后即使被回显，也稳定落在 2 整行；真正的"缩到多小"交给 minResizeHeight。
+
+  targetCellWidth/Height 只是**默认**摆放尺寸（Android 12+ 的启动器用它），
+  不影响能缩到多小，所以维持 4×3 —— 那是之前调好的默认观感。
+
+  矮组件里页脚会自动收起（见 WidgetData.COMPACT_BELOW_DP），把高度让给课程。
+
+  minResizeWidth / minResizeHeight 也一并写上：不写的话由系统回退到 minWidth/minHeight，
+  多数启动器读的是这两个（**部分启动器只认它们**），显式写死更保险。
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:initialLayout="@layout/widget_today"
+    android:minWidth="150dp"
+    android:minHeight="150dp"
+    android:minResizeWidth="150dp"
+    android:minResizeHeight="90dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="3"
+    android:resizeMode="horizontal|vertical"
+    android:updatePeriodMillis="1800000"
+    android:widgetCategory="home_screen"
+    android:description="@string/widget_description" />
