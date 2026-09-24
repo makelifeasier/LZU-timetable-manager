@@ -112,7 +112,6 @@ data class Agenda(
 ) {
     fun startsAt(): java.time.LocalDateTime = date.atTime(start)
     fun endsAt(): java.time.LocalDateTime = date.atTime(end)
-    val sectionLabel: String get() = session.sectionSpanLabel
 }
 
 data class ParseResult(

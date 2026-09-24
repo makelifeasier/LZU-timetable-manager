@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  节日祝福卡片。
+  刻意自带圆角背景（bg_card）：弹窗的 window 背景在 GreetingDialog 里被设成透明，
+  否则窗口那层方角底色会从卡片圆角外面露出来 —— 看起来就是"一张白卡片贴在另一块方白底上"。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_card"
+    android:orientation="vertical"
+    android:padding="20dp">
+
+    <!-- 节日名。可能同时命中多个（元旦 + 腊八），用 · 串起来 -->
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:letterSpacing="0.06"
+        android:textColor="@color/accent"
+        android:textSize="13sp"
+        android:textStyle="bold" />
+
+    <!-- 农历小字（"农历正月初一"）。只有农历节日才显示，默认隐藏 -->
+    <TextView
+        android:id="@+id/lunar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:textColor="@color/text_secondary"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- 祝福语。多条祝福各占一行，不拼成一句长话 -->
+    <TextView
+        android:id="@+id/greeting"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:lineSpacingExtra="4dp"
+        android:textColor="@color/text_primary"
+        android:textSize="16sp" />
+
+    <!-- 「知道啦」。用设置页同款胶囊按钮，而不是系统 AlertDialog 的按钮栏：
+         窗口背景已经透明，系统按钮栏会落在卡片外面 -->
+    <TextView
+        android:id="@+id/btn_ok"
+        style="@style/TextButton.Accent"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="18dp" />
+</LinearLayout>

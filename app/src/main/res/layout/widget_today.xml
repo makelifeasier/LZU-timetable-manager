@@ -103,4 +103,57 @@
         android:layout_marginTop="4dp"
         android:textColor="@color/widget_subtext"
         android:textSize="10sp" />
+
+    <!--
+      每日一句：只在你打开开关、且列表下方**确实有余量**时显示（见 WidgetData.extraSpaceDp）。
+      单行 + 省略号：宁可截断，也不让它把小组件撑高、把课程挤走。
+    -->
+    <TextView
+        android:id="@+id/widget_quote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="@color/widget_subtext"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+    <!--
+      图片框：一个 FrameLayout 里放两套控件，按开关切可见性 ——
+      RemoteViews 不能在运行时动态加控件，所以只能"静态并存 + setViewVisibility"。
+        · 轮播开启 → AdapterViewFlipper（小组件里唯一能自动切换的东西）
+        · 轮播关闭 → 单个 ImageView（只显示第一张）
+      尺寸由代码按小组件宽高比用 setViewLayoutWidth/Height 设置（见 TodayWidgetProvider）。
+    -->
+    <FrameLayout
+        android:id="@+id/widget_photo_area"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/widget_row_bg"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/widget_photo_image"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/widget_photo_desc"
+            android:scaleType="centerCrop" />
+
+        <!--
+            注意：这里**不能**写 android:inAnimation / outAnimation。
+            AdapterViewAnimator（API 30+）用 AnimatorInflater 加载这两个属性，
+            而 @android:anim/fade_in 是老的 View 动画资源 —— 加载时会抛
+            "Unknown animator name: alpha"，整个小组件 inflate 失败（整块变成空白）。
+            不指定就用自己的默认值，切换动画照样有。
+        -->
+        <AdapterViewFlipper
+            android:id="@+id/widget_photo_flipper"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:autoStart="true"
+            android:flipInterval="10000"
+            android:visibility="gone" />
+    </FrameLayout>
 </LinearLayout>

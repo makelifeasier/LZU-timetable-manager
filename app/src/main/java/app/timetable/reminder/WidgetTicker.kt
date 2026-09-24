@@ -20,10 +20,30 @@ object WidgetTicker {
     private const val REQ_BASE = 45000
     private const val REQ_SPAN = 64
 
+    /**
+     * 每日心跳的时刻（次日凌晨）。
+     *
+     * 为什么是 00:05 而不是 00:00：换天后要立刻重算"今天"，但 00:00 那一分钟
+     * 正撞上系统的日期变更与一堆整点任务；挪 5 分钟既避开拥挤，又保证
+     * 用户 6 点起床看到的已经是新一天。
+     */
+    val HEARTBEAT_TIME: LocalTime = LocalTime.of(0, 5)
+
     fun reschedule(context: Context) {
         val app = context.applicationContext
         val am = app.getSystemService(AlarmManager::class.java) ?: return
         cancelAll(app, am)
+
+        // 上课提醒那边只排未来 N 天的一次性闹钟，续期原本只发生在
+        // App 启动 / 开机 / 同步成功 / 设置变更四处 —— 没有任何一处保证每天都发生。
+        // 结果就是"一周多不开 App，提醒永久消失"，而且不报错、不提示。
+        // 每天 00:05 的心跳（见文件头）是这个 App 唯一不依赖用户行为的每日续命点，
+        // 所以在这里重排一次提醒。
+        //
+        // 注意位置：必须紧跟在 cancelAll 后面、**在所有 return 之前**。
+        // 上面自己刚把整个 requestCode 区间的闹钟取消掉了，紧接着的 return
+        // （没有课表数据时）会导致"取消了却不再排" —— 把提醒一起误杀。
+        ReminderScheduler.reschedule(app)
 
         val result = TimetableRepository.result()
         if (result.sections.isEmpty()) return
@@ -45,13 +65,10 @@ object WidgetTicker {
             if (req > REQ_BASE + REQ_SPAN) break
             fireAt(app, am, at.atZone(zone).toInstant().toEpochMilli(), req++)
         }
-        // 次日凌晨补一次：换天 + 重排新一天的边界
-        fireAt(
-            app, am,
-            LocalDateTime.of(today.plusDays(1), LocalTime.of(0, 5))
-                .atZone(zone).toInstant().toEpochMilli(),
-            req
-        )
+
+        // 次日凌晨补一次：换天 + 重排新一天的边界 + 续期上课提醒（见上面 ReminderScheduler 那行）
+        val heartbeat = LocalDateTime.of(today.plusDays(1), HEARTBEAT_TIME)
+        fireAt(app, am, heartbeat.atZone(zone).toInstant().toEpochMilli(), req)
     }
 
     fun cancelAll(context: Context) {

@@ -1,12 +1,18 @@
-﻿package app.timetable
+package app.timetable
 
 import android.content.Intent
+import android.net.http.SslError
 import android.os.Bundle
 import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.SslErrorHandler
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
+import android.webkit.WebStorage
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.PopupMenu
@@ -65,14 +71,55 @@ class LoginActivity : BaseActivity() {
     /** 累积到的候选链接（多轮扫描的结果合并） */
     private val found = ArrayList<String>()
 
-    /** 刚点过「学生课表」菜单，正在等页面跳转或菜单展开 */
+    /**
+     * 刚点过页面里的菜单（我们注入的 clickJs），正在等页面跳转或菜单原地展开。
+     *
+     * 由 [onLoaded] 消费：跳到新页面即"发现中途换页"，要清掉 discoveryDone 重新发现。
+     * **只在真正点下去的地方置 true** ——
+     * 以前全文件只有两处写 false、没有任何地方写 true，这条分支是够不着的死代码，
+     * 于是"点开学生课表跳到中间页"就永远按"发现已完成"往下走。
+     */
     private var pendingMenuClick = false
 
-    /** 发现步骤的令牌：页面一换就让排队中的旧步骤作废 */
+    /**
+     * 发现步骤的令牌：页面一换就让排队中的旧步骤作废。
+     *
+     * 与 [navigationToken] 的分工：这个令牌管"同一次导航内部"的抢占 ——
+     * 「点击后跳转」和「点击后原地展开」会各自排一步，谁先到谁作数；
+     * 而 [navigationToken] 管"换页"这种更大的事（见 [delayed] 里的双重校验）。
+     */
     private var discoveryToken = 0
+
+    /**
+     * 主框架第几次开始加载 —— 也就是"这是哪一个页面"的代际号。
+     *
+     * 由 [onPageStarted] 递增。所有排队中的发现步骤与旧页面的脚本回调都拿它当凭据：
+     * 页面一换，上一页排的队全部作废。以前只有 [discoveryToken]、而且换页时没人递增它，
+     * 于是点菜单跳转之后，老页面那个"等 1.6 秒再扫一次"会在**新页面**上执行，
+     * 把用户从刚到的页面上又强行带走（发现链和用户的点击互相抢导航）。
+     */
+    private var navigationToken = 0
 
     /** 本轮是否已经试过「上次成功导入过的课表链接」 */
     private var savedUrlTried = false
+
+    /** 本轮自动发现是在哪一页发起的（用来识别"发现中途换页"，见 [onLoaded]） */
+    private var discoveryUrl: String? = null
+
+    /**
+     * 抓取的"代际号"。
+     *
+     * evaluateJavascript 的回调没有超时机制：页面卡住时它可能永远不回，也可能**很久以后才回**。
+     * 看门狗超时复位闩锁之后，新一轮抓取会用到这个号 —— 迟到的旧回调发现自己不是当前代，
+     * 直接作废，不会去改新一轮的状态。
+     */
+    private var captureSeq = 0
+
+    /** 抓取看门狗（超时复位闩锁），回调正常回来时撤掉 */
+    private var captureWatchdog: Runnable? = null
+
+    /** WebView 是否已销毁：destroy() 之后绝不能再 loadUrl / evaluateJavascript */
+    private var webDestroyed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,11 +147,68 @@ class LoginActivity : BaseActivity() {
         binding.webView.webChromeClient = WebChromeClient()
         binding.webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                if (url != null) binding.loginStatus.text = "正在打开：${shorten(url)}"
+                // 主框架开始加载 = 换页了 → 作废这一页排下的所有队。
+                // 必须在"开始加载"而不是"加载完成"时作废：等 1.2~1.6 秒的那几步正好落在
+                // 新页面的加载过程中，晚作废一步它们就已经在新页面上跑起来了
+                // （表现：用户刚点进中间页，页面又被发现逻辑点走 / 跳走）。
+                navigationToken++
+                if (url != null && webUsable()) binding.loginStatus.text = "正在打开：${shorten(url)}"
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                if (!webUsable()) return
                 onLoaded(url)
+            }
+
+            /**
+             * 主框架加载失败（断网 / DNS 解析不了 / 连接超时 / TLS 握手失败…）。
+             *
+             * **只看主框架**：新版这个回调对**所有资源**都会触发 —— 一张图、一个统计脚本
+             * 加载失败不该把整条登录流程打断（子资源失败由 WebView 自己兜着）。
+             *
+             * 为什么必须补它：本 Activity 原来只认 onPageFinished，于是门户超时的表现是
+             * 状态栏**永远**停在「正在打开你的课表…」，WebView 里是一张系统错误页，
+             * 既不报错也没有下一步（对照：后台抓取那条路反而有 20s 超时，见 net/Fetcher）。
+             */
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                val req = request ?: return
+                if (!req.isForMainFrame) return
+                failNetwork("主框架加载失败", error?.errorCode ?: 0)
+            }
+
+            /**
+             * HTTP 4xx/5xx。
+             *
+             * 这里**不打断流程**：教务系统把「学年传递错误」这类提示页也是用错误码/正常码返回的，
+             * 页面本身会渲染出来，后面 onPageFinished 的抓取逻辑能从内容里认出它。
+             * 只在状态栏先说一句，免得用户对着"空白页"猜。
+             */
+            override fun onReceivedHttpError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                errorResponse: WebResourceResponse?
+            ) {
+                val req = request ?: return
+                if (!req.isForMainFrame) return
+                if (!webUsable()) return
+                val code = errorResponse?.statusCode ?: 0
+                binding.loginStatus.text = "服务器返回 HTTP $code，这一页可能不是课表，正在按页面内容判断…"
+                Prefs.trace("主框架 HTTP $code  ${shorten(req.url.toString())}")
+            }
+
+            /**
+             * 证书错误。
+             *
+             * **不 proceed()**：放行等于把中间人劫持当正常路径走。默认实现就是 cancel，
+             * 这里显式写出来，只为把"为什么打不开"讲给用户听（校园网网关劫持时会遇到）。
+             */
+            override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                handler?.cancel()
+                failNetwork("证书错误 ${error?.primaryError ?: 0}", LoginFlow.NET_ERR_SSL)
             }
         }
 
@@ -114,6 +218,8 @@ class LoginActivity : BaseActivity() {
     // ------------------------------------------------------------- 导航决策
 
     private fun loadStart() {
+        // destroy() / 正在结束时绝不能再 loadUrl（登出回调可能晚到，见 MENU_LOGOUT）
+        if (!webUsable()) return
         capturing = false
         bouncedFromBrokenLogin = false
         autoNavigatedToTimetable = false
@@ -125,11 +231,39 @@ class LoginActivity : BaseActivity() {
         found.clear()
         pendingMenuClick = false
         savedUrlTried = false
+        discoveryUrl = null
         Prefs.loginTrace = ""
         binding.webView.loadUrl(Prefs.portalUrl)
     }
 
+    /**
+     * WebView 现在还能用吗。
+     *
+     * onDestroy 里 destroy() 之后 WebView 不可再碰，而有些回调是**晚到**的：
+     * 清 Cookie 的 ValueCallback、网络失败回调、抓取/发现的排队任务。
+     * 一律先用它挡一下，避免"Activity 已经退出还在 loadUrl"。
+     */
+    private fun webUsable(): Boolean = !webDestroyed && !isFinishing && !isDestroyed
+
+    /**
+     * 主框架加载失败的统一出口：把原因翻译成人话（含下一步动作），
+     * 并**复位抓取闩锁** —— 页面在"正在提取…"时失败，闩锁若不松开，
+     * 之后每次自动抓取都会在 [captureCurrentPage] 第一行静默 return，
+     * 整轮会话的自动导入全废（只能靠 ⋮ →「导入当前页面」，而它恰好会先复位）。
+     */
+    private fun failNetwork(what: String, code: Int) {
+        if (!webUsable()) return
+        capturing = false
+        binding.loginStatus.text = LoginFlow.loadFailureText(code, sawAuthInThisRun)
+        Prefs.trace("网络失败：$what code=$code url=${shorten(binding.webView.url.orEmpty())}")
+    }
+
     private fun onLoaded(url: String) {
+        if (!webUsable()) return
+
+        // 换页作废排队步骤这件事放在 onPageStarted 里做（见 navigationToken）：
+        // 那里才是"页面换了"的第一个信号，放到这里等于晚了一整次加载。
+
         // 导航轨迹。这条日志是排查「登录后一直不出课表」的第一手材料
         Log.i(TAG, "onLoaded: ${shorten(url)}")
 
@@ -139,6 +273,20 @@ class LoginActivity : BaseActivity() {
             pendingMenuClick = false
             discoveryDone = false
             Prefs.trace("点菜单后到达新页面，重新扫描")
+        }
+
+        // 「发现中途换页」：本轮发现是在 A 页发起的，链接还没选出来就跳到了 B 页
+        // （点菜单、页面自己重定向、用户手点，都算）。这时若仍按"发现已完成"往下走，
+        // LoginFlow 会给出 GO_TIMETABLE，而 discoveredUrl 是空的 → 首次用户当场看到
+        // 「没能自动找到课表入口」就此停住。把标记清掉，让新页面重新发现一轮
+        // （轮数上限照旧兜住死循环）。
+        // 已经选出了链接、或已经跳过一次课表页时**不清** —— 那两种情况再发现就变成
+        // "劫持用户的浏览"了（用户可能正自己点着看）。
+        if (discoveryDone && discoveredUrl == null && !autoNavigatedToTimetable &&
+            discoveryUrl != null && discoveryUrl != url && discoveryRounds < MAX_DISCOVERY_ROUNDS
+        ) {
+            discoveryDone = false
+            Prefs.trace("发现中途换页，改在新页面重新发现")
         }
 
         // 到达真正的登录页 = 上一轮会话作废，四个标记都要清零。
@@ -245,6 +393,9 @@ class LoginActivity : BaseActivity() {
      */
     private fun discoverTimetable() {
         discoveryRounds++
+        // 记下这一轮是在哪一页发起发现的：下一轮 onLoaded 若发现"换页了、链接还没选出来"，
+        // 就知道这是「发现中途换页」，要重新发现而不是直接收尾（见 onLoaded）。
+        discoveryUrl = binding.webView.url
         if (discoveryRounds > MAX_DISCOVERY_ROUNDS) {
             Prefs.trace("发现：已试 $discoveryRounds 轮，收手")
             giveUpDiscovery()
@@ -293,6 +444,10 @@ class LoginActivity : BaseActivity() {
 
             STEP_EXPAND_MENU -> {
                 binding.loginStatus.text = "试着展开「信息查询」这类菜单…"
+                // 点下去的菜单可能只是原地展开，也可能**跳到新页面**（中间页）。
+                // 后者就是「发现中途换页」：由 onLoaded 消费这个标记，清掉 discoveryDone
+                // 后在新页面重新发现。这里是唯一给 pendingMenuClick 置位的地方。
+                pendingMenuClick = true
                 evaluate(clickJs(MENU_PARENT_KEYS)) { raw ->
                     Prefs.trace("点父菜单：${decodeJsString(raw).orEmpty().ifBlank { "无返回" }}")
                     delayed(STEP_DELAY_CLICK) { runStep(STEP_SCAN_AFTER_EXPAND) }
@@ -301,6 +456,9 @@ class LoginActivity : BaseActivity() {
 
             STEP_CLICK_TIMETABLE -> {
                 binding.loginStatus.text = "试着点开「学生课表」…"
+                // 同上：点「学生课表」跳到的往往是带正确 id/yearid/termid 的链接，
+                // 但也可能是"选择学年"这类中间页 —— 中间页必须重新发现，不能当成"发现已完成"。
+                pendingMenuClick = true
                 evaluate(clickJs(MENU_TIMETABLE_KEYS)) { raw ->
                     Prefs.trace("点课表入口：${decodeJsString(raw).orEmpty().ifBlank { "无返回" }}")
                     delayed(STEP_DELAY_CLICK) { runStep(STEP_SCAN_AFTER_TIMETABLE) }
@@ -313,18 +471,31 @@ class LoginActivity : BaseActivity() {
 
     /** 跑一段注入脚本 */
     private fun evaluate(js: String, onResult: (String?) -> Unit) {
-        binding.webView.evaluateJavascript(js) { raw -> onResult(raw) }
+        // 晚到的排队步骤可能在 destroy() 之后才跑到这里（见 webUsable）
+        if (!webUsable()) return
+        val nav = navigationToken
+        binding.webView.evaluateJavascript(js) { raw ->
+            // 页面已经换掉了 → 这个结果属于上一页，丢掉（否则会在新页面上接着按老页面的
+            // 发现进度往下走，把用户从新页面带走）
+            if (nav == navigationToken && webUsable()) onResult(raw)
+        }
     }
 
     /**
      * 延迟执行。
      *
-     * 用令牌作废过期回调：页面一换（onLoaded 里 token++），上一页排队的步骤就作废 ——
-     * 否则「点击后跳转」和「点击后原地展开」两条路径会同时往下跑，状态互相打架。
+     * 双重校验：
+     *  - [discoveryToken]：同一次导航内部的抢占 —— 点菜单后「跳转」与「原地展开」
+     *    两条路径会各排一步，后者必须作废，否则两条发现链同时往下跑、状态互相打架；
+     *  - [navigationToken]：换页 —— 页面一开始加载，上一页排的队全部作废，
+     *    绝不把用户从新页面上带走。
      */
     private fun delayed(ms: Long, body: () -> Unit) {
+        val nav = navigationToken
         val token = ++discoveryToken
-        binding.webView.postDelayed({ if (token == discoveryToken) body() }, ms)
+        binding.webView.postDelayed({
+            if (nav == navigationToken && token == discoveryToken && webUsable()) body()
+        }, ms)
     }
 
     /** 在累积到的候选里挑一条打开 */
@@ -463,8 +634,15 @@ class LoginActivity : BaseActivity() {
 
     private fun captureCurrentPage() {
         if (capturing) return
+        if (!webUsable()) return
         capturing = true
+        // 本次抓取的代际号：看门狗超时后，这个号会变，迟到的旧回调据此作废
+        val seq = ++captureSeq
+        armCaptureWatchdog(seq)
         binding.webView.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { raw ->
+            // 看门狗已经判过超时、或已经开了新一轮抓取 → 这次结果没用了，直接丢掉
+            if (seq != captureSeq) return@evaluateJavascript
+            disarmCaptureWatchdog()
             val html = decodeJsString(raw)
             // 判据是「取到的到底是不是 HTML」，不是长度。
             // 之前用 length > 500：教务系统返回的提示页/错误页可能只有几百字节，
@@ -505,7 +683,12 @@ class LoginActivity : BaseActivity() {
                     setResult(RESULT_OK)
                     finish()
                 } else {
-                    binding.loginStatus.text = failMsg
+                    // 取到的是非课表页 → 这里**绝不能报成功**。
+                    // 其中有一类最容易被误报成成功的：页面确实是课表页，却一段课都没解析出来
+                    // （本学期还没排课、或页面结构变了）。原来它会复用"没找到课表页"那套文案，
+                    // 等于把"解析到 0 门课"和"没找到页"混在一起说。现在分开讲。
+                    val atTimetablePage = TimetableLink.looksLikeTimetable(binding.webView.url.orEmpty())
+                    binding.loginStatus.text = if (atTimetablePage) ZERO_COURSE_HINT else failMsg
                     capturing = false
                     // 刚才如果是直接打开「上次保存的链接」而没读到课表（常见于跨学期，
                     // 链接里的 yearid 过期了），就**回门户首页**重新找。
@@ -525,6 +708,8 @@ class LoginActivity : BaseActivity() {
                 Prefs.trace("抓取：未取到源码，转后台抓取")
                 binding.loginStatus.text = "未取到页面源码，改用后台抓取…"
                 TimetableRepository.refresh(this) { st ->
+                    // refresh 的回调在主线程，但可能晚到（用户/系统已经把页面关了）
+                    if (!webUsable()) return@refresh
                     if (st.ok) {
                         Toast.makeText(this, R.string.login_success, Toast.LENGTH_SHORT).show()
                         finish()
@@ -534,6 +719,37 @@ class LoginActivity : BaseActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 抓取看门狗。
+     *
+     * `evaluateJavascript` 的回调**没有超时**：页面卡住（或脚本被 CSP 拦掉）它就永远不回来，
+     * 而 [capturing] 是单向闩锁 —— 一次没回来，此后每次自动抓取都在 [captureCurrentPage]
+     * 第一行 `if (capturing) return` 静默返回，**整轮会话的自动导入全废**：
+     * 状态栏停在「已进入学生课表页，正在提取…」不动，只有 ⋮ →「导入当前页面」能救
+     * （而它恰好会先把闩锁复位，所以现象是"手动导入管用、自动流程永远不行"）。
+     * 这里给等待加一个上限，到点就松开闩锁并告诉用户下一步怎么办。
+     */
+    private fun armCaptureWatchdog(seq: Int) {
+        val r = Runnable {
+            if (seq != captureSeq) return@Runnable      // 结果已经回来了，看门狗不用管
+            capturing = false
+            if (webUsable()) {
+                binding.loginStatus.text =
+                    "页面没有回话（抓取超时，可能这一页卡住了）。" +
+                        "可以点 ⋮ →「导入当前页面」再试一次；如果是登录过期，点「走统一身份认证入口」重新登录。"
+            }
+            Prefs.trace("抓取：等待页面回话超时，已复位抓取状态")
+        }
+        captureWatchdog = r
+        binding.webView.postDelayed(r, CAPTURE_TIMEOUT_MS)
+    }
+
+    /** 结果回来了：撤掉看门狗，免得它过一会儿又把状态改掉 */
+    private fun disarmCaptureWatchdog() {
+        captureWatchdog?.let { binding.webView.removeCallbacks(it) }
+        captureWatchdog = null
     }
 
     // ------------------------------------------------------------- 菜单
@@ -569,15 +785,56 @@ class LoginActivity : BaseActivity() {
         }
 
         MENU_LOGOUT -> {
+            // 用户**明确点了登出/要换账号**：本机存的那份课表也要一起清掉，否则就是把上一个人的
+            // 东西留给下一个人用：
+            //  1. `Prefs.timetableUrl` 那条链接里带着**上一个人的学籍内部号 `id=`**，
+            //     不清的话下次登录时自动发现会先走"已经有过一条能用的链接 → 直接打开"这条捷径
+            //     （见 DO_DISCOVERY），打开的正是别人的课表；
+            //  2. 缓存课表（`Prefs.resultJson`）不清，登出后主页/小组件还在显示上一个人的课。
+            // 走仓库现成的入口、不自己造轮子：clearCache() 清派生缓存，reloadFromPrefs()
+            // 把"现在是空课表"推下去 —— 后者内部会刷新小组件、重排提醒并通知界面。
+            //
+            // ⚠ 别和下面抓取失败那条路径搞混：那里"上次保存的链接没读到课表"是**会话临时失效**
+            //   （Cookie 过期），链接本身还是对的，清掉反而让下次要重扫一遍菜单，所以刻意不清。
+            //   只有用户明确登出这一条路才清。
+            Prefs.clearCache()
+            Prefs.timetableUrl = ""
+            TimetableRepository.reloadFromPrefs(this)
+
+            // 除了 Cookie，还要清 **WebStorage 和表单数据**：本页 domStorageEnabled = true，
+            // 门户/教务系统会把上一个账号的痕迹写进 localStorage/sessionStorage。
+            // 只 removeAllCookies 的话，换账号登录会带着上一个人的本地存储（可能直接影响课表页的渲染）。
+            // WebStorage.deleteAllData() 内部要走 WebView 的 IO 线程，必须在主线程调用 ——
+            // 菜单回调本来就是主线程，所以放在这里正好。
+            runCatching { WebStorage.getInstance().deleteAllData() }
+            binding.webView.clearFormData()
             CookieManager.getInstance().removeAllCookies {
                 CookieManager.getInstance().flush()
-                Toast.makeText(this, "已清空登录状态", Toast.LENGTH_SHORT).show()
+                // 回调可能在 Activity 已经结束时才回来：那时不能再 loadUrl
+                if (!webUsable()) return@removeAllCookies
+                Toast.makeText(this, "已清空登录状态与本地课表", Toast.LENGTH_SHORT).show()
                 loadStart()
             }
             true
         }
 
         else -> false
+    }
+
+    /**
+     * 退出：**先撤掉排队中的定时任务与加载，再 destroy()**。
+     *
+     * WebView 从来没有 destroy() 是这里的老问题：Activity 没了、WebView 还攥着页面与
+     * 后台线程，长时间反复进登录页会白占内存。destroy() 之后这个 WebView 不可再用，
+     * 所以顺序必须是"打标记 → 撤定时任务 → 停加载 → destroy"，否则晚到的回调
+     * （Cookie 回调、抓取看门狗、发现步骤）会在销毁后再去 loadUrl / 执行脚本。
+     */
+    override fun onDestroy() {
+        webDestroyed = true
+        disarmCaptureWatchdog()
+        runCatching { binding.webView.stopLoading() }
+        runCatching { binding.webView.destroy() }
+        super.onDestroy()
     }
 
     // ------------------------------------------------------------- 工具
@@ -613,6 +870,24 @@ class LoginActivity : BaseActivity() {
 
     companion object {
         private const val TAG = "Timetable"
+
+        /**
+         * 等页面回话（evaluateJavascript 取 outerHTML）的上限。
+         *
+         * 10 秒：正常页面几百毫秒就回来，超过这个数基本就是卡住了；
+         * 又刻意短于后台抓取的 20s（见 net/Fetcher），用户不至于在这里干等太久。
+         */
+        private const val CAPTURE_TIMEOUT_MS = 10_000L
+
+        /**
+         * 「页面是课表页、却一段课都没解析出来」时的文案。
+         *
+         * 措辞刻意保持**中性**（"没解析出课程"）而不是"导入成功"：0 门课不是成功，
+         * 数据库/提示都不能按成功处理。同时给两条可操作的出路，别让人对着空白页猜。
+         */
+        private const val ZERO_COURSE_HINT =
+            "页面已加载，但没解析出课程（可能这学期还没排课，或课表页的结构变了）。" +
+                "点 ⋮ →「导入当前页面」可重试，详细原因见 设置 →「诊断」。"
 
         /**
          * 自动发现最多扫几轮。

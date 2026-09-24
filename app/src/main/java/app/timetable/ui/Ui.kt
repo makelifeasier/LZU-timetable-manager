@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.animation.DecelerateInterpolator
 import app.timetable.data.Prefs
 
 /** 通用 UI 工具 + 深色模式覆盖 + edge-to-edge 适配 */
@@ -53,6 +54,30 @@ object Ui {
             if (isNight(activity)) 0 else WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
             WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
         )
+    }
+
+    /**
+     * 轻量进入动效：淡入 + 轻微上移。
+     *
+     * 只用来做「内容换了」的提示（切周、换风格），**不做**位移动画 ——
+     * 课表是整块密集信息，滑来滑去反而看不清，淡入已经足够让人知道"这一屏更新了"。
+     * 关掉动效时直接落位，不留任何过渡。
+     */
+    fun enter(view: View, fromDp: Float = 6f, duration: Long = 190) {
+        if (!Prefs.animEnabled) {
+            view.alpha = 1f
+            view.translationY = 0f
+            return
+        }
+        view.animate().cancel()
+        view.alpha = 0f
+        view.translationY = dpf(view.context, fromDp)
+        view.animate()
+            .alpha(1f)
+            .translationY(0f)
+            .setDuration(duration)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
     }
 }
 

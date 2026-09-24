@@ -19,6 +19,10 @@
                 <action android:name="app.timetable.debug.SELFCHECK" />
                 <action android:name="app.timetable.debug.NETCHECK" />
                 <action android:name="app.timetable.debug.RENDERCHECK" />
+                <action android:name="app.timetable.debug.STYLECHECK" />
+                <action android:name="app.timetable.debug.FEATURECHECK" />
+                <action android:name="app.timetable.debug.SEED" />
+                <action android:name="app.timetable.debug.GREETCHECK" />
             </intent-filter>
         </receiver>
     </application>

@@ -1,4 +1,4 @@
-package app.timetable.ui
+﻿package app.timetable.ui
 
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -82,8 +82,13 @@ object TimetableRenderer {
         fun height(): Float = headerH + sectionCount * rowH
     }
 
-    fun metrics(width: Float, density: Float, result: ParseResult): Metrics {
-        val maxRow = maxOf(result.sections.maxOfOrNull { it.index } ?: 0, MIN_ROWS)
+    /**
+     * @param minRows 最少画几行。真实课表页用 [MIN_ROWS]（只有 2 节课时也画满一屏，
+     *                避免页面塌成一条）；设置页的风格预览会传更小的值（样张只有 6 节），
+     *                这样预览不会比内容高出一大截。
+     */
+    fun metrics(width: Float, density: Float, result: ParseResult, minRows: Int = MIN_ROWS): Metrics {
+        val maxRow = maxOf(result.sections.maxOfOrNull { it.index } ?: 0, minRows)
         return Metrics(density, width, maxRow)
     }
 
@@ -111,13 +116,22 @@ object TimetableRenderer {
          */
         weekendTint: Boolean = true,
         /** 诊断用：收集「哪段文字被截断/被压缩」的记录（真机看不到画面时靠它验证） */
-        report: MutableList<String>? = null
+        report: MutableList<String>? = null,
+        /** 最少画几行，见 [metrics] */
+        minRows: Int = MIN_ROWS,
+        /**
+         * 已应用"当日调课"覆盖的网格（星期 → 课）。null = 直接用原始课表。
+         *
+         * 渲染器本身不认识 Context，所以覆盖由 TimetableRepository 算好后传进来 ——
+         * 这样才能保证"渲染用的课表"和"小组件/提醒用的课表"是同一份。
+         */
+        grid: Map<Int, List<Session>>? = null
     ) {
         val p = Palette(dark, accent)
-        val m = metrics(width, density, result)
+        val m = metrics(width, density, result, minRows)
         val h = m.height()
         val d = density
-        val grid = WeekCalc.weekGrid(result, week)
+        val days = grid ?: WeekCalc.weekGrid(result, week)
 
         val fill = Paint(Paint.ANTI_ALIAS_FLAG)
         val hair = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -159,11 +173,11 @@ object TimetableRenderer {
         canvas.drawLine(m.timeCol, m.headerH, m.timeCol, h, hair)
 
         drawTimeColumn(canvas, m, p, result, d)
-        drawCards(canvas, m, p, result, grid, todayDay, nowTime, seed, d, Style.of(style), report)
+        drawCards(canvas, m, p, result, days, todayDay, nowTime, seed, d, Style.of(style), report)
         drawNowLine(canvas, m, p, result, todayDay, nowTime, d)
 
         // 空状态
-        val hasAny = grid.values.any { it.isNotEmpty() }
+        val hasAny = days.values.any { it.isNotEmpty() }
         if (!hasAny) {
             val title: String
             val hint: String
@@ -496,14 +510,27 @@ object TimetableRenderer {
         week: Int,
         metrics: Metrics,
         x: Float,
-        y: Float
+        y: Float,
+        grid: Map<Int, List<Session>>? = null
     ): Session? {
         if (y < metrics.headerH || x < metrics.timeCol) return null
         val day = ((x - metrics.timeCol) / metrics.dayCol).toInt() + 1
         if (day !in 1..7) return null
         val section = ((y - metrics.headerH) / metrics.rowH).toInt() + 1
-        return WeekCalc.weekGrid(result, week)[day].orEmpty()
+        return (grid ?: WeekCalc.weekGrid(result, week))[day].orEmpty()
             .firstOrNull { section >= it.startSection && section <= it.endSection }
+    }
+
+    /**
+     * 命中"星期标题"那一条（表头上方）时返回星期列号 1..7，否则 null。
+     *
+     * 单独一个函数而不是并进 [hitTest]：表头本来没有课块，点它是"调整这一天的课表"，
+     * 语义完全不同 —— 混在一起会让 hitTest 的调用方分不清点到的是课还是标题。
+     */
+    fun hitDayHeader(metrics: Metrics, x: Float, y: Float): Int? {
+        if (y >= metrics.headerH || x < metrics.timeCol) return null
+        val day = ((x - metrics.timeCol) / metrics.dayCol).toInt() + 1
+        return if (day in 1..7) day else null
     }
 
     // -------------------------------------------------------------- 当前时刻

@@ -115,7 +115,12 @@ object WeekCalc {
         week1Monday: LocalDate,
         now: LocalDateTime,
         lookaheadDays: Int = 8,
-        limit: Int = 6
+        limit: Int = 6,
+        /**
+         * 注入「某天到底有哪些课」。默认走按周次算的原始课表；
+         * 小组件传 TimetableRepository.sessionsOn，这样「当日调课」的结果也能显示出来。
+         */
+        sessionsOn: ((LocalDate) -> List<Session>)? = null
     ): List<Agenda> {
         if (result.sessions.isEmpty() || limit <= 0) return emptyList()
         val out = ArrayList<Agenda>(limit)
@@ -124,7 +129,8 @@ object WeekCalc {
             val date = today.plusDays(offset.toLong())
             val week = weekOf(date, week1Monday)
             if (week < 1) continue
-            for (s in todaySessions(result, date, week)) {
+            val ofDay = sessionsOn?.invoke(date) ?: todaySessions(result, date, week)
+            for (s in ofDay) {
                 val start = result.section(s.startSection)?.startTime ?: continue
                 val end = result.section(s.endSection)?.endTime ?: start
                 if (!date.atTime(end).isAfter(now)) continue      // 已结束

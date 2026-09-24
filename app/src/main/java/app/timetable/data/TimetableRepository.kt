@@ -55,6 +55,58 @@ object TimetableRepository {
 
     fun result(): ParseResult = cached
 
+    // ------------------------------------------------- 当日调课（覆盖）统一入口
+
+    /**
+     * 某一天的课表（**已应用当日覆盖**）。
+     *
+     * 所有"看某一天要上什么"的地方都必须走这里：课表页、桌面小组件、导出图片、提醒。
+     * 否则会出现"App 里改了当天、小组件没变"这种最难解释的不一致 ——
+     * 当日覆盖本质上是**多了一条数据来源**，只能靠单一入口收口。
+     */
+    fun sessionsOn(context: Context, date: java.time.LocalDate): List<Session> {
+        val r = result()
+        val w1 = Prefs.week1MondayDate() ?: return emptyList()
+        val week = WeekCalc.weekOf(date, w1)
+        if (week < 1) return emptyList()
+        val day = WeekCalc.dayOf(date)
+        val base = WeekCalc.sessionsFor(r, day, week)
+        // 一律合并后再返回：调用方（课表页 / 小组件 / 今日弹窗）都拿它当"可直接显示的列表"。
+        // 不合并的话「第5节+第6节」会显示成两行，与没调课时的表现不一致。
+        val o = DayOverrides.get(context, date) ?: return WeekCalc.merge(base)
+        return WeekCalc.merge(
+            when (o.mode) {
+                // 替换：换成"另一周的同一星期几"
+                DayOverrides.Mode.REPLACE ->
+                    if (o.sourceWeek < 1) base else WeekCalc.sessionsFor(r, day, o.sourceWeek)
+
+                DayOverrides.Mode.CLEAR -> emptyList()
+                DayOverrides.Mode.ADD -> DayOverrides.mergeSorted(base, o.extra, day)
+            }
+        )
+    }
+
+    /**
+     * 某一周的网格（**已应用当日覆盖**）。课表页画的就是它。
+     *
+     * 逐日套一遍覆盖：只有当被覆盖的那一天正好落在当前显示的这周里才会生效。
+     */
+    fun weekGrid(context: Context, week: Int): Map<Int, List<Session>> {
+        val base = WeekCalc.weekGrid(result(), week)
+        val overrides = DayOverrides.all(context)
+        if (overrides.isEmpty()) return base
+        val w1 = Prefs.week1MondayDate() ?: return base
+        val monday = w1.plusWeeks((week - 1).toLong())
+        val out = LinkedHashMap<Int, List<Session>>()
+        for (day in 1..7) {
+            val date = monday.plusDays((day - 1).toLong())
+            val o = overrides[date]
+            out[day] = if (o == null) base[day].orEmpty() else sessionsOn(context, date)
+        }
+        // 覆盖可能引入"同一节重复"（ADD 加的课与原课同节），逐日再合并一次
+        return out.mapValues { (_, list) -> WeekCalc.merge(list) }
+    }
+
     /** 设置变更后：重排提醒 + 刷新小组件 + 通知 UI */
     fun notifyDataChanged(context: Context) {
         val app = context.applicationContext
@@ -99,18 +151,99 @@ object TimetableRepository {
         val parsed = TimetableParser.parse(html)
         Prefs.diagnosticsHtml = html
         if (parsed.sessions.isEmpty()) {
-            Prefs.loginExpired = false
+            // 这里**不能**把 loginExpired 清掉：解析出 0 门课既可能是"抓错页面"，
+            // 也可能是"会话真的过期了、抓到的是登录页"。一刀切清掉的话，
+            // 用户在未登录页面上点一次「导入当前页面」，主界面和小组件上的
+            // "建议重新登录"就会消失，而下次同步照样失败 —— 提示没了，问题还在。
             Prefs.lastSyncMessage = emptyMessage ?: "$source：解析到 0 门课（页面结构可能变了，见诊断）"
             Prefs.lastSyncAt = System.currentTimeMillis()
             status = SyncStatus(
                 ok = false, message = Prefs.lastSyncMessage, bytes = html.length,
-                sessionCount = 0, at = Prefs.lastSyncAt
+                sessionCount = 0, at = Prefs.lastSyncAt,
+                loginExpired = Prefs.loginExpired
             )
             notifyChanged()
             return false
         }
         commit(context, parsed, html, "已从${source}导入")
         return true
+    }
+
+    // ---------------------------------------------- 换学期后周次基准要不要重算（纯逻辑）
+
+    /**
+     * 一份课表的「学期签名」：形如 `"2026 秋"`，两个字段都空时返回空串。
+     *
+     * 之所以不直接用 `TermInfo.display`：签名会被写进 SharedPreferences 并长期参与比较，
+     * 需要**稳定**。display 是给人看的文案，哪天改了连接方式或过滤规则，
+     * 老用户存量签名就会和新的对不上，被误判成「换学期了」，白重置一次周次基准。
+     *
+     * 为什么 year、term 任一变化都要算换学期：年份变了（2026 春 → 2027 春）或季节变了
+     * （2026 春 → 2026 秋）都意味着另一份课表，周次基准必须重来。
+     */
+    fun termSignatureOf(term: TermInfo): String =
+        listOf(term.year.trim(), term.term.trim())
+            .filter { it.isNotEmpty() }
+            .joinToString(" ")
+
+    /**
+     * 重新导入后该怎么处理「第 1 周周一」。
+     *
+     * 背景：教务系统课表页里**没有当前周次**，第 1 周周一只能估（见 WeekCalc.initialWeek1Monday）。
+     * 以前只在 `week1Monday` 为空时才估 —— 于是上学期装过、下学期重新导入，基准还停在上学期：
+     * 当前周次会被算成 30+，`sessionsOn` / `weekGrid` 找不到任何 `weeks.contains(week)` 的课，
+     * 课表页空白、小组件空、提醒不排，而且「本周」按钮也救不回来（real 就是错的），
+     * 必须进设置手改。每学期复发一次。
+     *
+     * 取舍（下面前两条最要紧）：
+     *  - 学期**没变**时绝不动 `week1Monday`：用户可能在设置里精确校正过，
+     *    重新导入（自动同步每天都在做）不能把他的手改冲掉。
+     *  - 老版本升级上来的用户签名是空的，但基准已经有了 —— 这种情况只**补签名、不重算**，
+     *    否则一升级就把所有人的校正清零。
+     */
+    data class Week1Plan(
+        /** 把 [termSignatureOf] 的结果写回 Prefs（写成新签名，或给老用户补上） */
+        val seedSignature: Boolean = false,
+        /** 用 WeekCalc.initialWeek1Monday 重算第 1 周周一 */
+        val reestimateWeek1: Boolean = false,
+        /** 把「手动预览周次」清回 0（跟随今天） */
+        val resetManualWeek: Boolean = false,
+        /** 学期真的变了（只用于日志/说明，不代表一定重算过） */
+        val termChanged: Boolean = false
+    )
+
+    /**
+     * 纯决策：给定「已存签名 / 已存第 1 周周一 / 新解析出的签名」，该做什么。
+     * 一个 Android API 都不碰，所以能直接单元测试（见 TimetableRepositoryWeek1Test）。
+     */
+    fun planWeek1(storedSignature: String, storedWeek1: String, newSignature: String): Week1Plan {
+        val sig = newSignature.trim()
+        val stored = storedSignature.trim()
+
+        // 新学期还没解析出来（页面缺学年/季节）：什么都不做。
+        // 这时既不能写空签名，也不能估算 —— 估出来的基准可能完全是错的。
+        if (sig.isEmpty()) return Week1Plan()
+
+        // 签名变了（或第一次有签名）。老用户只补签名：他的基准是有意校正过的。
+        if (stored.isEmpty()) return Week1Plan(seedSignature = true)
+
+        if (stored == sig) {
+            return if (storedWeek1.isBlank()) {
+                // 学期没变但基准还没定过（装上后从没导入成功过）：估一个，并清掉手动周次
+                Week1Plan(resetManualWeek = true)
+            } else {
+                // 学期没变、基准已有 —— 保持用户手动校正过的值，绝不覆盖
+                Week1Plan()
+            }
+        }
+
+        // 学期换了：整学期都会因为错误基准而变空，必须重算，并把手动周次清回「跟随今天」
+        return Week1Plan(
+            seedSignature = true,
+            reestimateWeek1 = true,
+            resetManualWeek = true,
+            termChanged = true
+        )
     }
 
     private fun commit(context: Context, parsed: ParseResult, html: String, message: String) {
@@ -125,12 +258,26 @@ object TimetableRepository {
             httpCode = Prefs.lastHttpCode, finalUrl = Prefs.lastFinalUrl,
             bytes = html.length, sessionCount = parsed.sessions.size, at = Prefs.lastSyncAt
         )
-        // 首次导入：按学期估算第 1 周（教务系统页面上没有当前周次）。
-        // 估算不准也只是差一两周，用户可在设置里精确校正 ——
-        // 但绝不能假设「本周就是第 1 周」，那样第 8 周才装 App 的同学会看到完全错的课表。
-        if (Prefs.week1Monday.isBlank()) {
-            Prefs.week1Monday = WeekCalc.initialWeek1Monday(parsed, java.time.LocalDate.now()).toString()
+
+        // 周次基准：教务系统页面上没有当前周次，只能按学期估（估算不准也只是差一两周，
+        // 设置里可精确校正）；但**换了学期就必须重估** —— 否则整学期课表全空且救不回来。
+        // 具体取舍见 planWeek1。
+        val newSignature = termSignatureOf(parsed.term)
+        val plan = planWeek1(
+            storedSignature = Prefs.termSignature,
+            storedWeek1 = Prefs.week1Monday,
+            newSignature = newSignature
+        )
+        val today = java.time.LocalDate.now()
+        // 写基准只有两个时机：① 换学期（planWeek1 给出的 reestimateWeek1）；
+        // ② 基准本来就是空的（首次导入、或清空缓存后重新导入 —— 这条与老代码等价）。
+        // 其余一律不写：用户手动校正过的基准不能被每天的自动同步冲掉。
+        if (plan.reestimateWeek1 || Prefs.week1Monday.isBlank()) {
+            Prefs.week1Monday = WeekCalc.initialWeek1Monday(parsed, today).toString()
         }
+        if (plan.seedSignature) Prefs.termSignature = newSignature
+        if (plan.resetManualWeek) Prefs.manualWeek = 0
+
         TodayWidgetProvider.refreshAll(context)
         ReminderScheduler.reschedule(context)
         WidgetTicker.reschedule(context)

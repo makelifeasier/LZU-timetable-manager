@@ -1,4 +1,4 @@
-﻿// 注意：Kotlin DSL 里 `java` 会被解析成 Java 插件扩展，遮住 java.util 包名，
+// 注意：Kotlin DSL 里 `java` 会被解析成 Java 插件扩展，遮住 java.util 包名，
 // 所以必须用顶层 import 引入 Properties。
 import java.util.Properties
 
@@ -21,8 +21,8 @@ android {
         applicationId = "app.timetable"
         minSdk = 31
         targetSdk = 36
-        versionCode = 26
-        versionName = "3.2.1"
+        versionCode = 27
+        versionName = "3.3"
     }
 
     signingConfigs {

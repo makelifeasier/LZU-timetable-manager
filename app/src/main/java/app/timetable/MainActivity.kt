@@ -8,16 +8,21 @@ import android.view.View
 import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
+import app.timetable.data.DayOverrides
 import app.timetable.data.ParseResult
 import app.timetable.data.Prefs
 import app.timetable.data.Session
 import app.timetable.data.TimetableRepository
 import app.timetable.data.WeekCalc
 import app.timetable.databinding.ActivityMainBinding
+import app.timetable.greet.HolidayGreeter
 import app.timetable.share.ImageExporter
 import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
+import app.timetable.ui.DayEditDialog
+import app.timetable.ui.GuideOverlay
 import app.timetable.ui.Ui
+import app.timetable.widget.TodayWidgetProvider
 import java.time.LocalDate
 import java.time.LocalTime
 
@@ -30,6 +35,12 @@ class MainActivity : BaseActivity() {
     /** 手动预览的周次；0 = 跟随今天 */
     private var overrideWeek = 0
 
+    /** 课表"第一次出现在屏幕上"是否还没做过淡入（只做一次） */
+    private var firstReveal = true
+
+    /** 上一次看到的深/浅色状态，用来发现"在设置里改了主题" */
+    private var lastNight = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -38,6 +49,8 @@ class MainActivity : BaseActivity() {
         TimetableRepository.init(this)
 
         binding.timetable.onSessionTap = { showSessionDetail(it) }
+        // 点「周三」这一格表头 → 打开当日调课
+        binding.timetable.onDayHeaderTap = { showDayEditor(it) }
         binding.prevWeek.setOnClickListener { shiftWeek(-1) }
         binding.nextWeek.setOnClickListener { shiftWeek(1) }
         binding.thisWeek.setOnClickListener { jumpToCurrentWeek() }
@@ -48,6 +61,9 @@ class MainActivity : BaseActivity() {
         }
 
         overrideWeek = Prefs.manualWeek
+        lastNight = Ui.isNight(this)
+        // 清掉很久以前的调课记录，不然 prefs 会一直涨（只保留最近若干天）
+        DayOverrides.prune(this)
         TimetableRepository.addListener(listener)
         maybeAutoRefresh()
         render()
@@ -70,8 +86,24 @@ class MainActivity : BaseActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 主题可能在设置页被改过：夜间模式靠改写 uiMode 生效，只对**新建**的 Activity 起作用，
+        // 所以这里自己检测一次，变了就重建，否则会「上半部分还是浅色、课表已经是深色」。
+        val night = Ui.isNight(this)
+        if (night != lastNight) {
+            lastNight = night
+            TodayWidgetProvider.refreshAll(this)
+            recreate()
+            return
+        }
         applyBackground()
+        // 手选周次可能在设置页被改过（或点了「跟随今天」把 manualWeek 清 0）：
+        // 内存里的 overrideWeek 是 onCreate 时读的，不重读的话返回主页会继续显示旧的周次。
+        overrideWeek = Prefs.manualWeek
         render()
+        maybeShowGuide()
+        // 节日祝福：用户可能就是在设置页里把它打开的，回到主页时要立刻有机会弹出，
+        // 而不是等下一次冷启动（HolidayGreeter 自己保证一天只弹一次）
+        HolidayGreeter.maybeShow(this)
     }
 
     /** 自定义背景铺在根布局上（含蒙版），课表画布那层就不再铺底色 */
@@ -95,6 +127,7 @@ class MainActivity : BaseActivity() {
         popup.menu.add(0, MENU_EXPORT, 3, R.string.action_export)
         popup.menu.add(0, MENU_SETTINGS, 4, R.string.action_settings)
         popup.menu.add(0, MENU_DIAG, 5, R.string.action_diagnostics)
+        popup.menu.add(0, MENU_HELP, 6, R.string.action_help)
         popup.setOnMenuItemClickListener { onMenuAction(it.itemId) }
         popup.show()
     }
@@ -124,6 +157,10 @@ class MainActivity : BaseActivity() {
             startActivity(Intent(this, DiagnosticsActivity::class.java)); true
         }
 
+        MENU_HELP -> {
+            showGuide(); true
+        }
+
         else -> false
     }
 
@@ -134,6 +171,57 @@ class MainActivity : BaseActivity() {
             render()
         }
     }
+
+    // ------------------------------------------------------------- 新手引导
+
+    /**
+     * 首次使用的指点式引导。
+     *
+     * 出现的时机刻意定在"**课表已经有了**"之后：课表还是空的时候讲"点周几能调课"
+     * 是纯打扰，用户只想先把课表弄进来。所以它和首次登录提示不会同时出现 ——
+     * 登录完回来（onResume）才轮到它。
+     *
+     * 只自动出现一次（guideShown）。⋮ 菜单里的「使用帮助」可以随时再看。
+     */
+    private fun maybeShowGuide() {
+        if (Prefs.guideShown) return
+        if (GuideOverlay.isShowing()) return
+        if (!Prefs.hasTimetable || TimetableRepository.result().sessions.isEmpty()) return
+        // 先弹，弹出来了才记账。反过来的话，一旦 show() 因为任何原因没显示出来
+        // （遮罩宿主还没就绪、当时正在旋转等），这次机会就被永久消耗掉了
+        if (showGuide()) Prefs.guideShown = true
+    }
+
+    /** @return 是否真的显示出来了 */
+    private fun showGuide(): Boolean = GuideOverlay.show(
+        this,
+        listOf(
+            GuideOverlay.Step(
+                "点「周几」就能调课",
+                "点课表最上面那一行里的「周三」这类标题，可以只对这一天下手：" +
+                    "换到别的周的这节课、临时加一节、或者当天停课。改完只有这一天变，整学期不受影响。",
+                anchor = { binding.timetable }
+            ),
+            GuideOverlay.Step(
+                "左右切周看后面的课",
+                "这两颗箭头翻周次，「本周」一键跳回今天所在的周。" +
+                    "单双周上课的课会自动只在该出现的周里显示。",
+                anchor = { binding.weekBar }
+            ),
+            GuideOverlay.Step(
+                "把课表放到桌面",
+                "长按桌面空白处 → 选「小组件」 → 找到「兰大课表」拖出来。" +
+                    "组件里可以上下滑动看接下来的课，放多大就显示几行。",
+                anchor = { null }
+            ),
+            GuideOverlay.Step(
+                "右上角 ⋮ 里还有这些",
+                "同步（不用重新登录）、导出课表长图、设置（风格、背景、节日祝福、小组件）、" +
+                    "诊断（万一课表没抓对，可以导出原始页面反馈给我）。",
+                anchor = { binding.menuBtn }
+            )
+        )
+    )
 
     // ------------------------------------------------------------- 渲染
 
@@ -185,7 +273,9 @@ class MainActivity : BaseActivity() {
             if (showingNow) LocalTime.now() else null,
             weekMonday,
             Prefs.style,
-            weekendTint = Prefs.weekendTint
+            weekendTint = Prefs.weekendTint,
+            // 带上当日调课的结果：课表页是唯一画课的地方，网格必须来自仓库
+            grid = TimetableRepository.weekGrid(this, week)
         )
 
         // 只有「完全没有数据」才弹提示条；有数据就安静地显示课表
@@ -199,6 +289,12 @@ class MainActivity : BaseActivity() {
             }
         } else {
             binding.banner.visibility = View.GONE
+            // 课表第一次出现在屏幕上时淡入一次：刚导入完的那种"空页面突然有内容"如果不给
+            // 过渡，会让人以为界面闪了一下。只做一次，之后切周由 shiftWeek 负责。
+            if (firstReveal) {
+                firstReveal = false
+                Ui.enter(binding.timetable)
+            }
         }
     }
 
@@ -210,12 +306,14 @@ class MainActivity : BaseActivity() {
         overrideWeek = (week + delta).coerceIn(1, max)
         Prefs.manualWeek = overrideWeek
         render()
+        Ui.enter(binding.timetable)
     }
 
     private fun jumpToCurrentWeek() {
         overrideWeek = 0
         Prefs.manualWeek = 0
         render()
+        Ui.enter(binding.timetable)
     }
 
     private fun maybeAutoRefresh() {
@@ -230,6 +328,30 @@ class MainActivity : BaseActivity() {
     }
 
     // ------------------------------------------------------------- 今日
+
+    // ------------------------------------------------------------- 当日调课
+
+    /**
+     * 点了「周三」这个表头：对**当前显示的这一周**的这天做临时调整。
+     *
+     * 为什么挂在"表头"上：课表格子本身已经被占用了（点课时弹详情），
+     * 而"周三"这两个字是屏幕上唯一明确指向"这一列整天"的东西 —— 点哪儿调哪儿，不用解释。
+     */
+    private fun showDayEditor(day: Int) {
+        val result = TimetableRepository.result()
+        if (result.sessions.isEmpty()) {
+            Toast.makeText(this, "还没有课表，先登录导入", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val today = LocalDate.now()
+        val (week, _) = resolvedWeek(result, today)
+        val monday = Prefs.week1MondayDate()?.plusWeeks((week - 1).toLong())
+        if (monday == null) {
+            Toast.makeText(this, "周次还没校准，请到设置里设置第 1 周", Toast.LENGTH_SHORT).show()
+            return
+        }
+        DayEditDialog(this, day, monday.plusDays((day - 1).toLong())).show()
+    }
 
     // ------------------------------------------------------------- 课块详情
 
@@ -265,7 +387,8 @@ class MainActivity : BaseActivity() {
         val result = TimetableRepository.result()
         val today = LocalDate.now()
         val (week, _) = resolvedWeek(result, today)
-        val list = WeekCalc.todaySessions(result, today, week)
+        // sessionsOn 而不是按周次现算：这样"当天调课"的结果也会出现在这里
+        val list = TimetableRepository.sessionsOn(this, today)
         val text = if (list.isEmpty()) {
             "${Session.dayLabel(WeekCalc.dayOf(today))} · 第 $week 周\n\n今天没有课，好好休息。"
         } else {
@@ -323,5 +446,6 @@ class MainActivity : BaseActivity() {
         private const val MENU_EXPORT = 4
         private const val MENU_SETTINGS = 5
         private const val MENU_DIAG = 6
+        private const val MENU_HELP = 7
     }
 }

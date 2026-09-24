@@ -55,6 +55,12 @@
                 android:resource="@xml/widget_today_info" />
         </receiver>
 
+        <!-- 底部图片轮播的数据源。和列表一样，集合视图必须由 RemoteViewsService 供数 -->
+        <service
+            android:name=".widget.PhotoWidgetService"
+            android:exported="false"
+            android:permission="android.permission.BIND_REMOTEVIEWS" />
+
         <!-- 小组件可滑动列表的数据源；BIND_REMOTEVIEWS 是集合视图的强制要求 -->
         <service
             android:name=".widget.TimetableWidgetService"

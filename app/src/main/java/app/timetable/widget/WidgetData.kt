@@ -110,11 +110,23 @@ internal object WidgetData {
     /** 当前小组件的实际高度（dp） */
     fun widgetHeightDp(context: Context): Int {
         if (debugHeightOverrideDp > 0) return debugHeightOverrideDp
-        val raw = reportedHeightDp(context)
-        if (raw <= 0) return FALLBACK_WIDGET_DP
-        // 启动器"回显"我们声明的 minResizeHeight（见 looksLikeDeclaredEcho）时，
-        // 这个数字不含任何信息 —— 按 150dp 估，至少稳定给出 2 整行。
-        return if (looksLikeDeclaredEcho(raw)) maxOf(raw, FALLBACK_WIDGET_DP) else raw
+        return effectiveHeightDp(reportedHeightDp(context))
+    }
+
+    /**
+     * 纯函数（可单测）：把系统上报的高度换算成"采用高度"。
+     *
+     * 只有**恰好等于声明值的那一档**（[DECLARED_MIN_HEIGHT_DP] = 150dp 附近）才当成
+     * "启动器把声明值回显上来了"，抬到兜底高度；其余一律原样采信。
+     *
+     * 特别地，**90dp 是 [DECLARED_MIN_RESIZE_HEIGHT_DP]，是用户真能把组件拖到的最小尺寸**，
+     * 它是一个合法的真实高度，必须照实算：收掉页脚后 49dp（头部）+ 38dp（1 整行）= 87dp ≤ 90dp，
+     * 刚好放一整行课。以前把 89..91dp 一起当回显抬成 150dp，于是按 150dp 排出
+     * 2 行 76dp + 头尾 71dp = 147dp 硬塞进 90dp 的格子 —— 底部切出半行，只剩标题和被切一半的第一行。
+     */
+    fun effectiveHeightDp(rawDp: Int): Int {
+        if (rawDp <= 0) return FALLBACK_WIDGET_DP
+        return if (looksLikeDeclaredEcho(rawDp)) maxOf(rawDp, FALLBACK_WIDGET_DP) else rawDp
     }
 
     /** 系统**原样**回报的高度（dp），不做任何校正；0 = 没回报 */
@@ -130,19 +142,23 @@ internal object WidgetData {
     }
 
     /**
-     * 这个高度是不是"我们声明的 minResizeHeight 被原样回显"？
+     * 这个高度是不是"我们声明的 minHeight 被原样回显"？
      *
      * 小米 / OPPO / Pixel 回报的是**当前格子高度**（100~300dp 各不相同，都是真话）；
-     * 但荣耀 MagicOS 这一族实测会回报**声明值本身**。区别在于：真的格子高度是
-     * 连续分布的，回显只可能落在那两个声明值上 —— 所以这里只对
-     * `minResizeHeight ± 1` 这个**窄**区间做校正，绝不误伤真实的小格子。
+     * 但荣耀 MagicOS 这一族实测会把**声明值本身**当高度上报。区别在于：真的格子高度是
+     * 连续分布的，回显只可能落在声明值上 —— 所以只对 `minHeight ± 1` 这个窄区间做校正。
      *
-     * 声明 minHeight 从 90dp 提到 150dp 之后，回显值 = 150 = 兜底值，
-     * 校正本身变成恒等操作（不再影响任何观感），这一段只是防止再次改回去。
+     * **为什么只认 minHeight、不认 minResizeHeight（90dp）**：
+     * 90dp 不是"回显噪声"，而是**用户能把组件拖到的最小尺寸**（minResizeHeight），
+     * 也就是一个会真实出现的格子高度。把它一起当成回显抬到 150dp，就会按 2 行去排版
+     * 却塞进 90dp 的格子 —— 底部切出半行（真机上表现为"只看到标题和半行课"）。
+     * 90dp 该有的样子是：收掉页脚（49dp 头部）+ 1 整行（38dp）= 87dp，正好放下一行课。
+     * 换句话说，这里宁可漏判（真被回显 90dp 的机型按 90dp 排 1 行）也不能误判
+     * （把用户真拖到的最小格子撑成 150dp 的排法）。而当前 minHeight 就是 150dp、
+     * 兜底值也是 150dp，所以这一段校正对正常机型已经是恒等操作，只防再次改回去。
      */
     fun looksLikeDeclaredEcho(rawDp: Int): Boolean =
-        rawDp in (DECLARED_MIN_RESIZE_HEIGHT_DP - 1)..(DECLARED_MIN_RESIZE_HEIGHT_DP + 1) ||
-            rawDp in (DECLARED_MIN_HEIGHT_DP - 1)..(DECLARED_MIN_HEIGHT_DP + 1)
+        rawDp in (DECLARED_MIN_HEIGHT_DP - 1)..(DECLARED_MIN_HEIGHT_DP + 1)
 
     /** 手动指定的行数；0 = 跟随系统给的高度 */
     fun manualRows(context: Context): Int {
@@ -172,15 +188,23 @@ internal object WidgetData {
      *  - 放了页脚就不足 2 行、收掉正好够 2 行 → 收（小米那种矮格子就靠这条救回来）
      *  - 其它情况（≥150dp 的正常尺寸）→ **保持原样**，不在用户已经满意的观感上乱动
      */
-    fun dropFooter(context: Context): Boolean {
+    fun dropFooter(context: Context): Boolean =
+        compactFor(widgetHeightDp(context), manualRows(context), naturalSlotDp(context))
+
+    /**
+     * 纯函数核心（可单测）：要不要收掉页脚。
+     *
+     * 判据与 [dropFooter] 完全同源 —— 抽出来只是为了能在单测里直接喂高度，
+     * 不必造 Context。
+     */
+    fun compactFor(heightDp: Int, manualRows: Int, slotDp: Float = ROW_SLOT_DP): Boolean {
         // 用户手动指定了行数 → 不自作主张。他要几行就给几行，
         // 页脚排在课程下面：万一还是放不下，系统裁掉的是页脚，不是课。
-        if (manualRows(context) > 0) return false
-        val h = widgetHeightDp(context)
-        val slot = naturalSlotDp(context)
-        val normalRows = ((h - CHROME_DP) / slot).toInt().coerceAtLeast(1)
-        val compactRows = ((h - CHROME_DP + FOOTER_DP) / slot).toInt().coerceAtLeast(1)
-        val normalOverflows = CHROME_DP + normalRows * slot > h
+        if (manualRows > 0) return false
+        val h = heightDp.toFloat()
+        val normalRows = ((h - CHROME_DP) / slotDp).toInt().coerceAtLeast(1)
+        val compactRows = ((h - CHROME_DP + FOOTER_DP) / slotDp).toInt().coerceAtLeast(1)
+        val normalOverflows = CHROME_DP + normalRows * slotDp > h
         return normalOverflows || (normalRows < 2 && compactRows > normalRows)
     }
 
@@ -214,11 +238,19 @@ internal object WidgetData {
     fun naturalSlotDp(@Suppress("UNUSED_PARAMETER") context: Context): Float = ROW_SLOT_DP
 
     /** 能放下的整行数（自动 1..4；手动指定时照办，1..6） */
-    fun visibleRows(context: Context): Int {
-        val manual = manualRows(context)
-        val slot = naturalSlotDp(context)
-        val available = (widgetHeightDp(context) - chromeDp(context)).coerceAtLeast(0f)
-        return resolveRows(available, slot, manual)
+    fun visibleRows(context: Context): Int =
+        rowsFor(widgetHeightDp(context), manualRows(context), naturalSlotDp(context))
+
+    /**
+     * 纯函数核心（可单测）：给定组件高度，能排下几整行。
+     *
+     * 与 [visibleRows] 同源，抽出来是为了能在单测里把"90dp 的最小格子"整条链路
+     * （采用高度 → 收页脚 → 整行数）跑一遍，不必造 Context。
+     */
+    fun rowsFor(heightDp: Int, manualRows: Int, slotDp: Float = ROW_SLOT_DP): Int {
+        val chrome = if (compactFor(heightDp, manualRows, slotDp)) CHROME_DP - FOOTER_DP else CHROME_DP
+        val available = (heightDp.toFloat() - chrome).coerceAtLeast(0f)
+        return resolveRows(available, slotDp, manualRows)
     }
 
     /**
@@ -252,7 +284,7 @@ internal object WidgetData {
         val verdict = when {
             manual > 0 -> "手动指定 $manual 行"
             minH <= 0 -> "系统没回报，按默认 ${FALLBACK_WIDGET_DP}dp"
-            looksLikeDeclaredEcho(minH) -> "⚠ 疑似回报了声明的最小数，已按 ${FALLBACK_WIDGET_DP}dp 估"
+            looksLikeDeclaredEcho(minH) -> "⚠ 疑似回报了声明的 minHeight，已按 ${FALLBACK_WIDGET_DP}dp 估"
             else -> "正常"
         }
         val h = widgetHeightDp(context)
@@ -260,6 +292,84 @@ internal object WidgetData {
             "\n系统原值：minH=$minH maxH=$maxH minW=$minW maxW=$maxW" +
             "｜本应用声明：minH=$DECLARED_MIN_HEIGHT_DP minResizeH=$DECLARED_MIN_RESIZE_HEIGHT_DP"
     }
+
+    // ------------------------------------------------- 列表下方的扩展区（每日一句 / 图片）
+
+    /**
+     * 列表下方还剩多少 dp 可用。
+     *
+     * 计算方式：上报高度 − 头部页脚（chrome）− 课程列表占用的整行高度。
+     * 根布局是 match_parent、子控件自顶向下排列，所以余量就落在底部。
+     *
+     * **这是估算**：上报高度本身在个别启动器上不准（荣耀把声明值当高度上报，见
+     * [looksLikeDeclaredEcho]），所以调用方一律"宁可少显示"：只要不确定就隐藏，
+     * 绝不会出现"显示了半截句子"这种更糟的观感。
+     */
+    fun extraSpaceDp(context: Context): Int {
+        val h = widgetHeightDp(context)
+        val used = chromeDp(context) + visibleRows(context) * naturalSlotDp(context)
+        return (h - used).toInt()
+    }
+
+    /** 底部扩展区（每日一句 / 图片）是否允许显示 */
+    fun extrasAllowed(context: Context): Boolean {
+        Prefs.init(context)
+        return when (Prefs.widgetExtrasOverride) {
+            -1 -> false          // 用户强制隐藏
+            1 -> true            // 用户强制显示（高度判断不准的机型用这个救）
+            else -> extraSpaceDp(context) >= EXTRA_MIN_DP
+        }
+    }
+
+    /** 图片是否可显示：开关开 + 至少有一张图 */
+    fun hasPhotos(context: Context): Boolean {
+        Prefs.init(context)
+        return Prefs.photoEnabled && photoList(context).isNotEmpty()
+    }
+
+    /** 已选图片的本地路径列表（最多 5 张） */
+    fun photoList(context: Context): List<String> {
+        Prefs.init(context)
+        val raw = Prefs.photoUris
+        if (raw.isBlank()) return emptyList()
+        return raw.split('\n').map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_PHOTOS)
+    }
+
+    /**
+     * 图片框高度（dp）。
+     *
+     * 按小组件的**宽高比**自适应：宽扁时做成接近方形，竖长时做成长方形 ——
+     * 这样在两种极端尺寸下都不会出现"一张细长条图"或"图把课程挤没"。
+     */
+    fun photoHeightDp(context: Context): Int {
+        val opts = widgetOptions(context) ?: return PHOTO_MIN_DP
+        val w = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+        val h = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
+        if (w <= 0 || h <= 0) return PHOTO_MIN_DP
+        // 竖长（高一倍以上）：图更高；宽扁：图矮一点，优先保住课程行
+        val ratio = if (h >= w) 1.15f else 0.72f
+        return (w * ratio).toInt().coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
+    }
+
+    /** 当前小组件的 options（取不到返回 null） */
+    private fun widgetOptions(context: Context): android.os.Bundle? {
+        val mgr = AppWidgetManager.getInstance(context) ?: return null
+        val ids = runCatching {
+            mgr.getAppWidgetIds(ComponentName(context, TodayWidgetProvider::class.java))
+        }.getOrDefault(IntArray(0))
+        val id = ids.firstOrNull() ?: return null
+        return runCatching { mgr.getAppWidgetOptions(id) }.getOrNull()
+    }
+
+    /** 列表下方的扩展区最少需要多少 dp 才显示（一句话约 20dp，图片更多） */
+    const val EXTRA_MIN_DP = 22
+
+    /** 图片框的最小/最大高度（dp） */
+    const val PHOTO_MIN_DP = 56
+    const val PHOTO_MAX_DP = 150
+
+    /** 最多几张图片 */
+    const val MAX_PHOTOS = 5
 
     /**
      * 列表高度（dp）= 整行数 × 实测行高。
@@ -282,7 +392,7 @@ internal object WidgetData {
             val today = now.toLocalDate()
             val week = WeekCalc.weekOf(today, week1)
             if (week < 1) emptyList()
-            else WeekCalc.todaySessions(result, today, week).mapNotNull { s ->
+            else TimetableRepository.sessionsOn(context, today).mapNotNull { s ->
                 val start = result.section(s.startSection)?.startTime ?: return@mapNotNull null
                 val end = result.section(s.endSection)?.endTime ?: start
                 Row(
@@ -297,7 +407,16 @@ internal object WidgetData {
                 )
             }
         } else {
-            WeekCalc.agenda(result, week1, now, LOOKAHEAD_DAYS, MAX_ITEMS).map { a ->
+            // 传 sessionsOn：小组件显示的「接下来」必须和 App 里看到的一致，
+            // 否则当天调课之后小组件还在念原来的课
+            WeekCalc.agenda(
+                result,
+                week1,
+                now,
+                LOOKAHEAD_DAYS,
+                MAX_ITEMS,
+                sessionsOn = { d -> TimetableRepository.sessionsOn(context, d) }
+            ).map { a ->
                 Row(
                     name = a.session.name,
                     spanLabel = result.sectionRangeLabel(a.session.startSection, a.session.endSection),

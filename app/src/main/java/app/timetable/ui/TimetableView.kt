@@ -30,9 +30,14 @@ class TimetableView @JvmOverloads constructor(
     private var weekMonday: LocalDate? = null
     private var style: Int = 0
     private var weekendTint: Boolean = true
+    /** 已应用当日覆盖的网格（由 TimetableRepository 算好传进来；null = 用原始课表） */
+    private var grid: Map<Int, List<Session>>? = null
 
     /** 点中某个课块时回调 */
     var onSessionTap: ((Session) -> Unit)? = null
+
+    /** 点中星期标题（表头）时回调列号 1..7 —— 用来打开「当日调课」 */
+    var onDayHeaderTap: ((Int) -> Unit)? = null
 
     fun setData(
         result: ParseResult,
@@ -41,7 +46,8 @@ class TimetableView @JvmOverloads constructor(
         nowTime: LocalTime?,
         weekMonday: LocalDate?,
         style: Int,
-        weekendTint: Boolean = true
+        weekendTint: Boolean = true,
+        grid: Map<Int, List<Session>>? = null
     ) {
         this.result = result
         this.week = week
@@ -50,6 +56,7 @@ class TimetableView @JvmOverloads constructor(
         this.weekMonday = weekMonday
         this.style = style
         this.weekendTint = weekendTint
+        this.grid = grid
         requestLayout()
         invalidate()
     }
@@ -80,7 +87,8 @@ class TimetableView @JvmOverloads constructor(
             // 自定义背景由 Activity 根布局铺（含蒙版），画布这层就不要再铺底色，
             // 否则会盖住图片、蒙版还会叠两次
             drawBackground = Prefs.bgType == 0,
-            weekendTint = weekendTint
+            weekendTint = weekendTint,
+            grid = grid
         )
     }
 
@@ -91,7 +99,14 @@ class TimetableView @JvmOverloads constructor(
                 val metrics = TimetableRenderer.metrics(
                     width.toFloat(), resources.displayMetrics.density, result
                 )
-                val hit = TimetableRenderer.hitTest(result, week, metrics, event.x, event.y)
+                // 先看是不是点在"星期标题"那一条上：那里没有课块，但可以调整当天的课表
+                val day = TimetableRenderer.hitDayHeader(metrics, event.x, event.y)
+                if (day != null && onDayHeaderTap != null) {
+                    performClick()
+                    onDayHeaderTap?.invoke(day)
+                    return true
+                }
+                val hit = TimetableRenderer.hitTest(result, week, metrics, event.x, event.y, grid)
                 if (hit != null) {
                     performClick()
                     onSessionTap?.invoke(hit)

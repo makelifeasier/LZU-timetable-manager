@@ -136,4 +136,45 @@ object LoginFlow {
      *    （例如「打开门户→课表→撞坏链→兜回门户→被 302 到认证页→登录→回到门户」这条路径）
      */
     fun isRealLoginPage(url: String): Boolean = url.contains("sso.lzu.edu.cn")
+
+    // ------------------------------------------------- 主框架加载失败（登录页 WebView）
+
+    /**
+     * WebView 的错误码。
+     *
+     * 故意写成普通 Int 常量、**不 import android.webkit**：本文件是纯 JVM 逻辑
+     * （连 hostOf 都不用 android.net.Uri），引了 Android 类型就没法在本机跑单测。
+     * 取值与 `WebViewClient.ERROR_*` / `onReceivedSslError` 一一对应，调用方直接把
+     * WebView 给的错误码传进来即可。
+     */
+    const val NET_ERR_HOST_LOOKUP = -2   // WebViewClient.ERROR_HOST_LOOKUP
+    const val NET_ERR_CONNECT = -6       // ERROR_CONNECT
+    const val NET_ERR_IO = -7            // ERROR_IO
+    const val NET_ERR_TIMEOUT = -8       // ERROR_TIMEOUT
+    const val NET_ERR_SSL = -11          // ERROR_FAILED_SSL_HANDSHAKE / onReceivedSslError
+
+    /**
+     * 主框架加载失败时给用户看的一句话。
+     *
+     * 为什么要有它：登录页原来只认 `onPageFinished`，门户超时 / DNS 挂掉 / TLS 出错时，
+     * 状态栏永远停在「正在打开你的课表…」，WebView 里只有一张系统错误页 ——
+     * 既不报错也没有下一步，用户只能干等（而同一条后台抓取路径反而有 20s 超时，见 net/Fetcher）。
+     * 所以这段文案必须同时做到两件事：**说清是网络的哪一环**、**给出下一步动作**
+     * （重试入口就是登录页右上角的 ⋮ 菜单）。
+     *
+     * @param sawAuth 本轮是否已经走过认证页/票据页。走过就说明"登录其实是成功的"，
+     *   文案不能再让人以为要去重新登录 —— 那是另一类问题（登录成功但没找到课表页）。
+     */
+    fun loadFailureText(code: Int, sawAuth: Boolean = false): String {
+        val what = when (code) {
+            NET_ERR_HOST_LOOKUP -> "域名解析不了（多半是断网，或 DNS 不通）"
+            NET_ERR_TIMEOUT -> "连接超时（网络太慢，或门户/教务系统没有响应）"
+            NET_ERR_CONNECT, NET_ERR_IO -> "连不上服务器（网络断了，或被校园网/代理挡住）"
+            NET_ERR_SSL -> "证书校验没过（连接不安全：校内网关劫持、或网关证书有问题时就是这样）"
+            else -> "网页没能打开"
+        }
+        val who = if (sawAuth) "已登录成功，但要打开的页面没打开：" else "网络没通："
+        return "$who$what。检查一下网络后，点右上角 ⋮ →「走统一身份认证入口」重新登录，" +
+            "或等网络恢复后点 ⋮ →「导入当前页面」重试。"
+    }
 }

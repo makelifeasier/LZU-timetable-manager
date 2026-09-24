@@ -17,9 +17,20 @@ import android.webkit.WebViewClient
 import android.widget.TextView
 import android.widget.Toast
 import app.timetable.R
+import app.timetable.data.DayOverrides
+import app.timetable.data.ParseResult
 import app.timetable.data.Prefs
+import app.timetable.data.Section
+import app.timetable.data.Session
+import app.timetable.data.TimetableJson
 import app.timetable.data.TimetableRepository
 import app.timetable.data.WeekCalc
+import app.timetable.greet.GreetingDialog
+import app.timetable.greet.Holidays
+import app.timetable.greet.LunarCalendar
+import app.timetable.greet.QuoteOfDay
+import app.timetable.ui.SampleTimetable
+import app.timetable.ui.StylePreviewView
 import app.timetable.ui.TimetableRenderer
 import app.timetable.widget.AgendaFactory
 import app.timetable.widget.TodayWidgetProvider
@@ -52,6 +63,10 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             when (intent.action) {
                 ACTION_NETCHECK -> probeCleartext(context, intent.getStringExtra(EXTRA_URL) ?: DEFAULT_PROBE)
                 ACTION_RENDERCHECK -> renderCheck(context)
+                ACTION_STYLECHECK -> styleCheck(context)
+                ACTION_FEATURECHECK -> featureCheck(context)
+                ACTION_SEED -> seedData(context)
+                ACTION_GREETCHECK -> greetCheck(context)
                 else -> widgetSelfCheck(context)
             }
         } finally {
@@ -280,9 +295,338 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 .append(" footer=").append(footer)
                 .append(" rows=[").append(rowDesc).append("]")
         } catch (t: Throwable) {
+            // 带上完整堆栈：InflateException 的 message 只到"哪个类"，
+            // 真正的原因在 Caused by 里（例如 RemoteViews 的类白名单拦截）
             report.append("RESULT=FAIL ").append(t.javaClass.name).append(": ").append(t.message)
+            Log.i(TAG, "WIDGET_SELFCHECK STACK", t)
         }
         Log.i(TAG, report.toString())
+    }
+
+    // --------------------------------------------------------- 风格预览自检
+
+    /**
+     * 把设置页那 6 种「课表风格」小样张各渲染一遍，用**像素统计**给出可读的结论。
+     *
+     * 为什么需要：真机上我看不到画面（只有文字），"预览是不是空白""6 种风格是不是真的不一样"
+     * 这种问题没法靠肉眼远程确认。而它恰好可以量化：
+     *  - 非背景像素占比 → 证明画上了东西（空白会接近 0%）
+     *  - 不同颜色数 → 6 种风格之间应当有明显差异（只差 1~2 色说明风格参数没生效）
+     * 验收标准：全部风格非底占比 > 10%，且不同风格的色数/占比不全相同。
+     */
+    private fun styleCheck(context: Context) {
+        val w = 620
+        val h = 640
+        val bg = 0xFFF5F7FA.toInt()
+        val sb = StringBuilder("STYLECHECK")
+        try {
+            val density = context.resources.displayMetrics.density * StylePreviewView.SCALE
+            for (i in app.timetable.ui.TimetableRenderer.Style.NAMES.indices) {
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                canvas.drawColor(bg)
+                TimetableRenderer.draw(
+                    canvas = canvas,
+                    width = w.toFloat(),
+                    density = density,
+                    result = SampleTimetable.result(),
+                    week = SampleTimetable.WEEK,
+                    dark = false,
+                    accent = 0xFF1E6FD9.toInt(),
+                    todayDay = SampleTimetable.TODAY_DAY,
+                    nowTime = null,
+                    weekMonday = null,
+                    seed = 20260923,
+                    style = i,
+                    drawBackground = false,
+                    weekendTint = true,
+                    report = null,
+                    minRows = SampleTimetable.result().sections.size
+                )
+                val px = IntArray(w * h)
+                bmp.getPixels(px, 0, w, 0, 0, w, h)
+                val colors = HashSet<Int>()
+                var nonBg = 0
+                for (p in px) {
+                    colors.add(p)
+                    if (p != bg) nonBg++
+                }
+                val pct = nonBg * 100.0 / px.size
+                sb.append(" ")
+                    .append(TimetableRenderer.Style.NAMES[i])
+                    .append("=")
+                    .append(String.format(java.util.Locale.CHINA, "%.1f%%", pct))
+                    .append("/").append(colors.size).append("色")
+                bmp.recycle()
+            }
+            Log.i(TAG, sb.toString())
+        } catch (t: Throwable) {
+            Log.i(TAG, "STYLECHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}")
+        }
+    }
+
+    // --------------------------------------------------------- 新功能自检（每日一句 / 图片 / 节日 / 调课）
+
+    /**
+     * 写入一份**合成课表**，让依赖真实数据的自检有东西可测。
+     *
+     * 为什么需要：模拟器上没登录过教务系统，没有数据时调课自检会 SKIP ——
+     * 看起来"通过"，其实什么都没验证。样本课表是合成的（1–25 周全周），
+     * 不含任何真实学生的信息。
+     */
+    private fun seedData(context: Context) {
+        try {
+            Prefs.init(context)
+            val monday = WeekCalc.mondayOf(LocalDate.now())
+            Prefs.resultJson = TimetableJson.toJson(realisticSample())
+            Prefs.week1Monday = monday.toString()
+            Prefs.timetableUrl =
+                "http://jwk.lzu.edu.cn/academic/manager/coursearrange/showTimetable.do?seed=1"
+            Prefs.firstRunPrompted = true
+            // 节日祝福默认是关的；自检时打开，好验证"节日当天真的会弹"
+            Prefs.greetEnabled = true
+            Prefs.greetLastShownDate = ""
+            TimetableRepository.reloadFromPrefs(context)
+            val r = TimetableRepository.result()
+            val week = WeekCalc.weekOf(LocalDate.now(), monday)
+            Log.i(
+                TAG,
+                "SEED 合成课表已写入 段数=${r.sessions.size} 节次=${r.sections.size} " +
+                    "第1周周一=$monday 当前周=$week 本周网格段数=" +
+                    TimetableRepository.weekGrid(context, week).values.sumOf { it.size } +
+                    " 节次表=" + r.sections.joinToString(",") { "${it.index}:${it.label}" }
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "SEED RESULT=FAIL ${t.javaClass.name}: ${t.message}")
+        }
+    }
+
+    /**
+     * 复刻兰大真实页面的**行序陷阱**：中午1节 / 中午2节 也各占一行，
+     * 所以「第 5 节」的行序其实是 7。
+     *
+     * 为什么自检数据要专门造这一点：界面各处存的都是行序，只有加课那一个入口
+     * 需要把用户输入的「第几节」翻译成行序。如果种子数据里行序恰好等于节次
+     * （样本课表就是如此），这个翻译对不对**根本测不出来**。
+     */
+    private fun realisticSample(): ParseResult {
+        val base = SampleTimetable.result()
+        val table = listOf(
+            Section(1, "第1节", "08:30", "09:15"),
+            Section(2, "第2节", "09:25", "10:10"),
+            Section(3, "第3节", "10:30", "11:15"),
+            Section(4, "第4节", "11:25", "12:10"),
+            Section(5, "中午1节", "12:20", "13:05"),
+            Section(6, "中午2节", "13:15", "14:00"),
+            Section(7, "第5节", "14:30", "15:15"),
+            Section(8, "第6节", "15:25", "16:10"),
+            Section(9, "第7节", "16:30", "17:15"),
+            Section(10, "第8节", "17:25", "18:10")
+        )
+        // 把样本里的行序 1..4 原样保留，5 及以后整体后移两行
+        fun remap(row: Int) = if (row <= 4) row else row + 2
+        return ParseResult(
+            term = base.term,
+            sections = table,
+            sessions = base.sessions.map {
+                it.copy(
+                    startSection = remap(it.startSection),
+                    endSection = remap(it.endSection)
+                )
+            },
+            unscheduled = base.unscheduled
+        )
+    }
+
+    /**
+     * 一次性验证三块新功能的**行为**（不只是"编译通过"）。
+     *
+     * 当日调课：同一份数据依次套上 替换 / 清空 / 加课 / 恢复，段数必须分别变成
+     * 源周段数 / 0 / >=基准 / 回到基准，并且课表页用的 weekGrid 也要跟着变 ——
+     * 数据源如果没收口到 sessionsOn，这里立刻露馅。
+     * 节日：拿已知日期交叉验证农历（春节必须是正月初一）。
+     * 每日一句 / 图片：句子非空、图片数量可读。
+     *
+     * 自检会写一条临时调课记录再删掉，跑完不留痕。
+     */
+    private fun featureCheck(context: Context) {
+        try {
+            Prefs.init(context)
+            TimetableRepository.init(context)
+            val today = LocalDate.now()
+            val w1 = Prefs.week1MondayDate()
+
+            Log.i(TAG, "FEATURECHECK ---- 当日调课 ----")
+            if (w1 == null) {
+                Log.i(TAG, "FEATURECHECK 调课=SKIP 未设置第 1 周（先发 SEED 广播灌入合成课表）")
+            } else {
+                val week = WeekCalc.weekOf(today, w1)
+                val monday = w1.plusWeeks((week - 1).toLong())
+                var bestDay = 1
+                var bestDate = monday
+                var bestCount = -1
+                for (day in 1..7) {
+                    val date = monday.plusDays((day - 1).toLong())
+                    val n = TimetableRepository.sessionsOn(context, date).size
+                    if (n > bestCount) {
+                        bestCount = n; bestDay = day; bestDate = date
+                    }
+                }
+                val base = TimetableRepository.sessionsOn(context, bestDate).size
+                Log.i(TAG, "FEATURECHECK 基准 第${week}周 周$bestDay $bestDate 段数=$base")
+
+                // 找一个段数和基准不同的源周，"替换"前后才有可见差异
+                val result = TimetableRepository.result()
+
+                // 样本课表里除了「高阶英语1」（第 4–18 周的双周）之外都是全周课，
+                // 所以"替换"必须挑一个单双周能体现差异的日期来测，否则替换前后一样多，
+                // 测试会假通过（第一版就是这么写的，看起来 OK 其实什么都没测）。
+                // 第 5 周（单周）周二本来没有课，替换成第 4 周（双周）周二应当出现 1 段。
+                val oddDate = w1.plusWeeks(4).plusDays(1)
+                val evenDate = w1.plusWeeks(3).plusDays(1)
+                val oddBase = TimetableRepository.sessionsOn(context, oddDate).size
+                val evenCount = TimetableRepository.sessionsOn(context, evenDate).size
+                DayOverrides.put(
+                    context, oddDate,
+                    DayOverrides.Override(DayOverrides.Mode.REPLACE, sourceWeek = 4)
+                )
+                val replaced = TimetableRepository.sessionsOn(context, oddDate).size
+                DayOverrides.remove(context, oddDate)
+                Log.i(
+                    TAG,
+                    "FEATURECHECK 替换 第5周周二(单周,期望本来 0)=$oddBase " +
+                        "换成第4周(双周,该天 $evenCount 段) 得到=$replaced " +
+                        (if (oddBase == 0 && replaced == evenCount && replaced > 0) "OK" else "FAIL")
+                )
+
+                // 清空 / 加课 / 恢复 用"本周课最多的一天"
+                val gridBefore = TimetableRepository.weekGrid(context, week).values.sumOf { it.size }
+                DayOverrides.put(context, bestDate, DayOverrides.Override(DayOverrides.Mode.CLEAR))
+                val cleared = TimetableRepository.sessionsOn(context, bestDate).size
+                val gridCleared = TimetableRepository.weekGrid(context, week).values.sumOf { it.size }
+
+                val extra = Session(
+                    name = "自检加课", room = "自检教室", day = bestDay,
+                    startSection = 1, endSection = 2
+                )
+                DayOverrides.put(
+                    context, bestDate,
+                    DayOverrides.Override(DayOverrides.Mode.ADD, extra = listOf(extra))
+                )
+                val added = TimetableRepository.sessionsOn(context, bestDate).size
+                val gridAdded = TimetableRepository.weekGrid(context, week).values.sumOf { it.size }
+
+                DayOverrides.remove(context, bestDate)
+                val restored = TimetableRepository.sessionsOn(context, bestDate).size
+
+                Log.i(TAG, "FEATURECHECK 清空当天 期望=0 实际=$cleared " + (if (cleared == 0) "OK" else "FAIL"))
+                Log.i(TAG, "FEATURECHECK 加一节课 期望=${base + 1} 实际=$added " + (if (added == base + 1) "OK" else "FAIL"))
+                Log.i(TAG, "FEATURECHECK 恢复原课表 期望=$base 实际=$restored " + (if (restored == base) "OK" else "FAIL"))
+                Log.i(
+                    TAG,
+                    "FEATURECHECK 课表页网格 清空后=$gridCleared(期望 ${gridBefore - base}) " +
+                        "加课后=$gridAdded(期望 ${gridBefore + 1}) " +
+                        (if (gridCleared == gridBefore - base && gridAdded == gridBefore + 1) "OK" else "FAIL")
+                )
+            }
+
+            Log.i(TAG, "FEATURECHECK ---- 节日祝福 ----")
+            Log.i(
+                TAG,
+                "FEATURECHECK 开关 总=${Prefs.greetEnabled} 公历=${Prefs.greetSolar} " +
+                    "农历=${Prefs.greetLunar} 校历=${Prefs.greetSchool} (期望 false/true/false/false)"
+            )
+            for (d in listOf(
+                LocalDate.of(2026, 1, 1),
+                LocalDate.of(2026, 2, 17),
+                LocalDate.of(2026, 6, 19),
+                LocalDate.of(2026, 9, 25),
+                LocalDate.of(2026, 10, 1),
+                today
+            )) {
+                val hits = Holidays.of(d).joinToString("/") { "${it.kind}:${it.name}" }
+                Log.i(TAG, "FEATURECHECK $d ${LunarCalendar.label(d)} 节日=[${hits.ifEmpty { "无" }}]")
+            }
+            val hitsToday = Holidays.of(today).filter {
+                when (it.kind) {
+                    Holidays.Kind.SOLAR -> Prefs.greetSolar
+                    Holidays.Kind.LUNAR -> Prefs.greetLunar
+                    Holidays.Kind.SCHOOL -> Prefs.greetSchool
+                }
+            }
+            Log.i(
+                TAG,
+                "FEATURECHECK 今日弹窗判定 应弹=" +
+                    (Prefs.greetEnabled && hitsToday.isNotEmpty() &&
+                        Prefs.greetLastShownDate != today.toString()) +
+                    " 命中=${hitsToday.size} 上次=${Prefs.greetLastShownDate.ifEmpty { "从未" }}"
+            )
+
+            Log.i(TAG, "FEATURECHECK ---- 小组件扩展 ----")
+            val quote = QuoteOfDay.forDate(today)
+            Log.i(TAG, "FEATURECHECK 每日一句 开关=${Prefs.quoteEnabled} 长度=${quote.length} 内容=$quote")
+            val listed = WidgetData.photoList(context)
+            Log.i(
+                TAG,
+                "FEATURECHECK 图片 开关=${Prefs.photoEnabled} 轮播=${Prefs.photoFlipEnabled}" +
+                    "(${Prefs.photoFlipSeconds}秒) 名单=${listed.size} 条 实际存在=" +
+                    listed.count { java.io.File(it).exists() } + " 个文件"
+            )
+            Log.i(
+                TAG,
+                "FEATURECHECK 余量 覆盖=${Prefs.widgetExtrasOverride} " +
+                    "允许扩展=${WidgetData.extrasAllowed(context)} 余量dp=${WidgetData.extraSpaceDp(context).toInt()}"
+            )
+            Log.i(TAG, "FEATURECHECK DONE")
+        } catch (t: Throwable) {
+            Log.i(TAG, "FEATURECHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    /**
+     * 直接弹一次节日祝福卡片（挑一个已知节日），用来验证弹窗本身能正常显示。
+     *
+     * 为什么不走 HolidayGreeter：它按"今天"判定，而模拟器是 production build
+     * 改不了系统日期 —— 逢不上节日就永远看不到弹窗。这里绕过日期判断，
+     * 用 10 月 1 日（国庆，公历类默认开）直接把卡片调起来。
+     */
+    private fun greetCheck(context: Context) {
+        try {
+            Prefs.init(context)
+            val date = LocalDate.of(2026, 10, 1)
+            val hits = Holidays.of(date)
+            Log.i(
+                TAG,
+                "GREETCHECK 日期=$date ${LunarCalendar.label(date)} " +
+                    "命中=[${hits.joinToString("/") { it.name }}] 祝福语长度=${hits.firstOrNull()?.greeting?.length}"
+            )
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "GREETCHECK RESULT=FAIL 没有前台 Activity（先把 App 打开再发广播）")
+                return
+            }
+            GreetingDialog.show(activity, date, hits)
+            Log.i(TAG, "GREETCHECK RESULT=OK 已调用 GreetingDialog.show")
+        } catch (t: Throwable) {
+            Log.i(TAG, "GREETCHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    /** 反射拿前台 Activity：debug-only 的取巧做法，release 包里没有这段 */
+    private fun currentActivity(): android.app.Activity? = try {
+        val cls = Class.forName("android.app.ActivityThread")
+        val thread = cls.getMethod("currentActivityThread").invoke(null)
+        val activities = cls.getDeclaredField("mActivities").apply { isAccessible = true }
+            .get(thread) as Map<*, *>
+        activities.values.firstNotNullOfOrNull { record ->
+            val recordCls = record!!.javaClass
+            val paused = recordCls.getDeclaredField("paused").apply { isAccessible = true }
+                .getBoolean(record)
+            if (paused) null else recordCls.getDeclaredField("activity").apply { isAccessible = true }
+                .get(record) as? android.app.Activity
+        }
+    } catch (t: Throwable) {
+        null
     }
 
     // --------------------------------------------------------- 明文策略自检
@@ -337,6 +681,10 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_SELFCHECK = "app.timetable.debug.SELFCHECK"
         const val ACTION_NETCHECK = "app.timetable.debug.NETCHECK"
         const val ACTION_RENDERCHECK = "app.timetable.debug.RENDERCHECK"
+        const val ACTION_STYLECHECK = "app.timetable.debug.STYLECHECK"
+        const val ACTION_FEATURECHECK = "app.timetable.debug.FEATURECHECK"
+        const val ACTION_SEED = "app.timetable.debug.SEED"
+        const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"
 
         /** 诊断用：强制小组件高度（dp） */

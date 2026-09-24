@@ -1,4 +1,4 @@
-package app.timetable.widget
+﻿package app.timetable.widget
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -154,6 +154,9 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 R.id.widget_mode,
                 broadcast(context, 2, ACTION_TOGGLE_MODE)
             )
+
+            // 列表下方的扩展区：每日一句 / 图片轮播（开关默认关闭，见 WidgetExtras）
+            WidgetExtras.apply(context, views, openApp)
 
             val status = TimetableRepository.status
             val result = TimetableRepository.result()

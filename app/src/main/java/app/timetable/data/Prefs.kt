@@ -46,8 +46,16 @@ object Prefs {
         get() = i("widgetRows", 0)
         set(v) = sp.edit().putInt("widgetRows", v.coerceIn(0, 6)).apply()
 
-    /** 行数选项文案，下标即取值（0 = 自动） */
-    val WIDGET_ROWS_NAMES = listOf("自动", "1 行", "2 行", "3 行", "4 行")
+    /**
+     * 行数选项文案，下标即取值（0 = 自动）。
+     *
+     * 为什么列到 6 行（而 [WidgetData.MANUAL_MAX_ROWS] 也正是 6、[widgetRows] 的校验也夹在
+     * 0..6）：这里以前只列到「4 行」，于是设置页最多只能选到 4 行，而组件本身明明能放 6 行
+     * —— 开关与校验对不上，用户在大格子上永远铺不满，只能看着底部空一块。
+     * 这个列表只影响设置页多出哪几个 chip，取值口径与组件侧完全一致。
+     */
+    val WIDGET_ROWS_NAMES = listOf("自动", "1 行", "2 行", "3 行", "4 行", "5 行", "6 行")
+
     private lateinit var sp: SharedPreferences
 
     fun init(context: Context) {
@@ -77,6 +85,23 @@ object Prefs {
     var week1Monday: String
         get() = s("week1")
         set(v) = sp.edit().putString("week1", v).apply()
+
+    /**
+     * 这份课表属于哪个学期，形如 `"2026 秋"`（由 [app.timetable.data.TermInfo.year] +
+     * [app.timetable.data.TermInfo.term] 拼成）。空 = 还没有学期信息。
+     *
+     * 为什么要单独存一个学期签名：**周次基准只对某一个学期成立**。
+     * 上学期装过、下学期重新导入时，第 1 周周一还是上学期那个日期，
+     * 当前周次会被算成 30+ —— 课表页、小组件、提醒会一起变空，
+     * 而且「本周」按钮也救不回来（算出来的周次本来就是错的）。
+     * 有了签名，重新导入时一比就知道学期换了没有，见 TimetableRepository.commit。
+     *
+     * 它**不是缓存**：清空缓存不会清它 —— 清完之后往往是同一学期重新抓一遍，
+     * 那时候必须保持原有周次基准不变。
+     */
+    var termSignature: String
+        get() = s("termSig")
+        set(v) = sp.edit().putString("termSig", v).apply()
 
     fun week1MondayDate(): LocalDate? =
         runCatching { LocalDate.parse(week1Monday) }.getOrNull()
@@ -142,9 +167,9 @@ object Prefs {
         get() = i("htmlBytes", 0)
         set(v) = sp.edit().putInt("htmlBytes", v).apply()
 
-    var lastRawHtml: String
-        get() = s("rawHtml")
-        set(v) = sp.edit().putString("rawHtml", v).apply()
+    // 这里原来还有一个 lastRawHtml（key = "rawHtml"）。它是死属性：全工程没有任何读写者，
+    // 诊断页用的是 diagnosticsHtml（key = "diagHtml"）—— 而 clearCache() 却在 remove "rawHtml"，
+    // 清一个永远不会存在的 key，真正堆在盘上的 diagHtml 反而没人清。已删除。
 
     // ------------------------------------------------------------- 提醒
     var reminderEnabled: Boolean
@@ -205,14 +230,138 @@ object Prefs {
         set(v) = sp.edit().putInt("bgScrim", v.coerceIn(0, 90)).apply()
 
     /** 上次抓到的原始页面，供诊断导出 */
-    var diagnosticsHtml: String
-        get() = s("diagHtml")
+    var diagnosticsHtml: String        get() = s("diagHtml")
         set(v) = sp.edit().putString("diagHtml", v).apply()
 
+    // ------------------------------------------------ 小组件扩展（全部默认关闭）
+
+    /**
+     * 小组件底部的「每日一句」。
+     * 默认**关闭** —— 只在你愿意把列表下方那块空白用起来时才打开。
+     */
+    var quoteEnabled: Boolean
+        get() = b("quoteEnabled")
+        set(v) = sp.edit().putBoolean("quoteEnabled", v).apply()
+
+    /** 小组件底部的图片框（最多 5 张，存 app 私有目录路径） */
+    var photoEnabled: Boolean
+        get() = b("photoEnabled")
+        set(v) = sp.edit().putBoolean("photoEnabled", v).apply()
+
+    /** 图片列表，换行分隔。图片在选图时就已压缩并复制进私有目录，卸载即清 */
+    var photoUris: String
+        get() = s("photoUris")
+        set(v) = sp.edit().putString("photoUris", v).apply()
+
+    /** 自动轮播（小组件里唯一可行的自动切换方式） */
+    var photoFlipEnabled: Boolean
+        get() = b("photoFlipEnabled")
+        set(v) = sp.edit().putBoolean("photoFlipEnabled", v).apply()
+
+    /** 轮播间隔（秒），只允许 5/10/30 */
+    var photoFlipSeconds: Int
+        get() = i("photoFlipSeconds", 10)
+        set(v) = sp.edit().putInt("photoFlipSeconds", if (v in PHOTO_FLIP_CHOICES) v else 10).apply()
+
+    // ------------------------------------------------ 节日祝福（默认全部关闭）
+
+    /** 祝福总开关。默认关闭 */
+    var greetEnabled: Boolean
+        get() = b("greetEnabled")
+        set(v) = sp.edit().putBoolean("greetEnabled", v).apply()
+
+    /** 公历节日（总开关打开后默认也是开的） */
+    var greetSolar: Boolean
+        get() = b("greetSolar", true)
+        set(v) = sp.edit().putBoolean("greetSolar", v).apply()
+
+    /** 农历节日（春节/中秋…），默认关闭 */
+    var greetLunar: Boolean
+        get() = b("greetLunar")
+        set(v) = sp.edit().putBoolean("greetLunar", v).apply()
+
+    /** 校历节点（开学/考试周/假期…），默认关闭 */
+    var greetSchool: Boolean
+        get() = b("greetSchool")
+        set(v) = sp.edit().putBoolean("greetSchool", v).apply()
+
+    /** 上一次弹过祝福的日期（yyyy-MM-dd），保证当天只弹一次 */
+    var greetLastShownDate: String
+        get() = s("greetLastShownDate")
+        set(v) = sp.edit().putString("greetLastShownDate", v).apply()
+
+    /** 新手引导是否已看过 */
+    var guideShown: Boolean
+        get() = b("guideShown")
+        set(v) = sp.edit().putBoolean("guideShown", v).apply()
+
+    // ------------------------------------------------ 当日调整（点周几表头）
+
+    /**
+     * 当日调课覆盖，JSON：`{"2026-10-08":{"mode":"REPLACE","week":7}}`。
+     *
+     * 只存「引用第几周」而不是整份课表：数据小、换学期重新导入后自动跟随；
+     * 只有手动"加一节课"才把那一节的字段存进去。
+     */
+    var dayOverrides: String
+        get() = s("dayOverrides")
+        set(v) = sp.edit().putString("dayOverrides", v).apply()
+
+    /** 小组件底部区域的强制开关：-1 强制隐藏 / 0 自动（按剩余高度判断）/ 1 强制显示 */
+    var widgetExtrasOverride: Int
+        get() = i("widgetExtrasOverride", 0)
+        set(v) = sp.edit().putInt("widgetExtrasOverride", v.coerceIn(-1, 1)).apply()
+
+    /**
+     * 「清空本地缓存」要清掉哪些 key。
+     *
+     * 判断标准只有一条：**这些值全部是派生数据** —— 抓回来的网页、解析出来的课表、
+     * 上一次同步的结果与诊断数字。清完下次同步会原样重新生成一遍。
+     *
+     * 所以下面这些**刻意不清**：
+     *  - `url` / `portalUrl`：用户导入/改过的来源，清了就得重新登录一遍；
+     *  - `termSig`：学期签名，清了同一学期重新抓一遍会白重算一次周次基准；
+     *  - `remindOn` / `bgType` / `style` / `dark` …：用户的设置，跟缓存无关；
+     *  - `photoUris` 指向的文件由相册管理，清 key 只会留下一堆读不到的文件。
+     *
+     * 以前这份清单是散在 [clearCache] 里的一串 `.remove(...)`：既写漏了
+     * `week1` / `manualWeek` / `dayOverrides`（换学期后清缓存再导入，旧基准会留着），
+     * 又在删一个根本没人写的 `rawHtml`。抽成常量是为了能被单元测试直接比对。
+     */
+    internal val CACHE_KEYS = listOf(
+        "result", "lastSyncAt", "lastSyncMsg",
+        "httpCode", "finalUrl", "htmlBytes",
+        "diagHtml", "loginTrace", "loginExpired",
+        "week1", "manualWeek", "dayOverrides"
+    )
+
+    /**
+     * 清空派生缓存。
+     *
+     * 注意 `week1` / `manualWeek` 也在清单里：周次基准是「这份课表的解释方式」，
+     * 跟着课表一起清掉，下次导入才会按**新**学期重新估算 —— 这正是修掉
+     * 「换了学期但周次基准还是上学期」那条链路的另一半。
+     * 不清 `termSig`：清完往往是同一学期重抓，签名留着才不会误判成换学期。
+     */
     fun clearCache() {
-        sp.edit()
-            .remove("result").remove("lastSyncAt").remove("lastSyncMsg")
-            .remove("httpCode").remove("finalUrl").remove("htmlBytes").remove("rawHtml")
-            .apply()
+        var e = sp.edit()
+        for (k in CACHE_KEYS) e = e.remove(k)
+        e.apply()
     }
+
+    /** 轮播间隔可选值（秒）。注意：属性初始化有先后顺序，所以这两行必须放在引用它们之前 */
+    private val PHOTO_FLIP_CHOICES = listOf(5, 10, 30)
+
+    /** 供设置页渲染 chips 用 */
+    val photoFlipChoices = PHOTO_FLIP_CHOICES
+
+    /**
+     * 界面动效（切周淡入、风格预览切换等），默认开。
+     *
+     * 留这个开关是因为动效对少数人（前庭敏感、老机器）是负担，
+     * 他们关掉之后应当立刻变回"瞬间切换"，而不是"动得更快"。
+     */
+    var animEnabled: Boolean
+        get() = b("animEnabled", true)
+        set(v) = sp.edit().putBoolean("animEnabled", v).apply()
 }

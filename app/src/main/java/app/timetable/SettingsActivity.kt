@@ -1,4 +1,4 @@
-﻿package app.timetable
+package app.timetable
 
 import android.app.AlertDialog
 import android.content.Intent
@@ -16,30 +16,74 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import app.timetable.data.Prefs
+import app.timetable.data.Session
 import app.timetable.data.TimetableRepository
 import app.timetable.data.WeekCalc
 import app.timetable.databinding.ActivitySettingsBinding
 import app.timetable.donate.DonateDialog
 import app.timetable.donate.Donations
+import app.timetable.greet.Holidays
+import app.timetable.greet.LunarCalendar
 import app.timetable.notify.Notifications
 import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
+import app.timetable.ui.StylePreviewView
 import app.timetable.ui.TimetableRenderer
 import app.timetable.ui.Ui
+import app.timetable.ui.YearCalendarView
 import app.timetable.widget.TodayWidgetProvider
+import app.timetable.widget.WidgetData
+import app.timetable.widget.WidgetPhotos
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
 class SettingsActivity : BaseActivity() {
 
     private lateinit var binding: ActivitySettingsBinding
+
+    /**
+     * 「现在第几周」步进器的草稿值。
+     *
+     * `draftInit` 是必须的：页面里任何一个开关/chip 都会走 build() 重建整页，
+     * 如果每次都无条件把草稿重置成真实周次，用户把 3 调到 9 之后顺手点一下同页的开关，
+     * 步进器就悄悄回到 3，再点「应用」设的还是 3（改动被吃掉）。
+     */
     private var draftWeek = 1
+    private var draftInit = false
+
+    /** 余量判断三个选项与它们的取值（顺序和取值故意不一致：自动在中间才是符合直觉的排法） */
+    private val OVERRIDE_LABELS = listOf("自动", "强制显示", "强制隐藏")
+    private val OVERRIDE_VALUES = listOf(0, 1, -1)
+
+    /** 课表风格预览的引用：改「周末底色」时也要重画它（它读的是 Prefs，但不会自己 invalidate） */
+    private var stylePreview: StylePreviewView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivitySettingsBinding.inflate(layoutInflater)
         setContentView(binding.root)
         build()
+    }
+
+    /**
+     * 监听仓库变化：设置页里的「立即同步」也是同步入口，同步完那三行状态
+     * （状态 / 最近一次 / HTTP）必须跟着变，否则用户会以为同步没生效。
+     *
+     * 但**输入框有焦点时不要重建页面** —— 用户正在手填课表链接，
+     * 后台同步刚好回来重建一次，他打的字就被清掉了。
+     */
+    private val repoListener: () -> Unit = {
+        if (currentFocus !is EditText) build()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        TimetableRepository.addListener(repoListener)
+    }
+
+    override fun onStop() {
+        TimetableRepository.removeListener(repoListener)
+        super.onStop()
     }
 
     // ------------------------------------------------------------- 构建
@@ -50,13 +94,18 @@ class SettingsActivity : BaseActivity() {
         val today = LocalDate.now()
         val w1 = Prefs.week1MondayDate()
         val realWeek = if (w1 != null) WeekCalc.weekOf(today, w1) else 1
-        draftWeek = realWeek.coerceIn(1, 30)
+        // 只在进页面时取一次真实周次当草稿，之后重建页面不要覆盖用户正在调的值
+        if (!draftInit) {
+            draftWeek = realWeek.coerceIn(1, 30)
+            draftInit = true
+        }
 
         buildSource()
         buildAccount()
         buildWeek(today, w1, realWeek)
         buildReminder()
         buildAppearance()
+        buildGreeting()
         buildMisc()
         buildSupport()
     }
@@ -239,6 +288,11 @@ class SettingsActivity : BaseActivity() {
                     setOnCheckedChangeListener { _, checked ->
                         Prefs.reminderEnabled = checked
                         TimetableRepository.notifyDataChanged(this@SettingsActivity)
+                        // Android 13+ 的 POST_NOTIFICATIONS 是运行时权限，不申请的话
+                        // 闹钟按时触发、通知却会被系统直接丢掉（而且失败是不抛异常的）。
+                        // 在用户**主动打开提醒**的这一刻申请，是这个权限最合理的时机。
+                        requestNotificationPermissionIfNeeded()
+                        build()
                     }
                 }
             )
@@ -285,6 +339,73 @@ class SettingsActivity : BaseActivity() {
                     Notifications.openNotificationSettings(this@SettingsActivity)
                 }
             }
+            // Android 14+ 起精确闹钟权限默认不预授予，拿不到就只能退化成"大约在那个时候"，
+            // 最坏会晚上 10 分钟（上课之后才响）。这里给一个明确的开启入口，别让用户干等。
+            row("提醒时间不准？", "系统允许「闹钟和提醒」精确到分钟后，通知才会准点") {
+                openExactAlarmSettings()
+            }
+        }
+    }
+
+    // ------------------------------------------------- 权限
+
+    private val REQ_NOTIF = 0x9B01
+
+    /**
+     * 申请动态通知权限（Android 13+）。
+     *
+     * 为什么不做成"一进设置页就申请"：用户在还没决定要不要提醒时被弹权限框，
+     * 大概率直接拒绝，之后系统不再允许弹第二次 —— 那就彻底收不到提醒了。
+     * 在开关被打开的那一刻申请，意图最清楚。
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (android.os.Build.VERSION.SDK_INT < 33) return
+        val granted = checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) return
+        runCatching {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIF)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_NOTIF) return
+        build()
+        if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            toast("已允许通知，提醒会准时到")
+        } else {
+            toast("没有通知权限，提醒到了也弹不出来 —— 可以点上面的「通知权限未开启」去开")
+        }
+    }
+
+    /** 跳到"闹钟和提醒"权限页（有的系统没有这一页，就退回到本应用的设置页） */
+    private fun openExactAlarmSettings() {
+        val am = getSystemService(android.app.AlarmManager::class.java)
+        val exactOk = am == null || am.canScheduleExactAlarms()
+        if (exactOk) {
+            toast("当前已经允许精确提醒")
+            return
+        }
+        val ok = runCatching {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                    data = android.net.Uri.fromParts("package", packageName, null)
+                }
+            )
+        }.isSuccess
+        if (!ok) {
+            runCatching {
+                startActivity(
+                    Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = android.net.Uri.fromParts("package", packageName, null)
+                    }
+                )
+            }
         }
     }
 
@@ -310,6 +431,9 @@ class SettingsActivity : BaseActivity() {
             group.check(Prefs.darkMode + 100)
             group.setOnCheckedChangeListener { _, checkedId ->
                 Prefs.darkMode = checkedId - 100
+                // 小组件的明暗是自己读 Prefs 画的，不刷新的话会一直停在旧配色上
+                TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                // 只重建本页只能让自己变深；主页在 onResume 里会自己检测到变化并重建
                 recreate()
             }
             addView(group)
@@ -324,26 +448,40 @@ class SettingsActivity : BaseActivity() {
         sectionTitle("课表风格")
         card {
             row("卡片样式", "点一下立刻切换，共 ${TimetableRenderer.Style.NAMES.size} 种")
-            addView(
-                chipGrid(TimetableRenderer.Style.NAMES, Prefs.style) { index ->
-                    Prefs.style = index
-                    TimetableRepository.notifyDataChanged(this@SettingsActivity)
-                    build()
-                }
-            )
+            // 样例预览：把样张小图直接画在这儿，用户不用进课表页就能比较 6 种风格的差别。
+            // 高度 = (表头 48dp + 4 行 × 62dp) × 0.78 ≈ 230dp，另加一点内边距。
+            // 底色用浅灰圆角卡片，缩略图才有"样片"的样子（白底白线会显得很空、很丑）。
+            val preview = StylePreviewView(this@SettingsActivity).apply {
+                style = Prefs.style
+                background = getDrawable(R.drawable.bg_card_alt)
+            }
+            // 留一个引用：下面的「周末底色」改了之后也要重画它，
+            // 否则预览里周末列还是旧的淡底色，用户会以为开关没生效
+            stylePreview = preview
+            addPadded(preview, heightDp = StylePreviewView.HEIGHT_DP, bottom = 10)
+            // 点选风格只更新"选中态 + 预览"两处，不重建整页 —— 重建会让设置页闪一下，
+            // 而挑风格本来就是连续点好几下的动作（丝滑的关键就在这儿）。
+            val chips = chipGridLive(TimetableRenderer.Style.NAMES, Prefs.style) { index ->
+                Prefs.style = index
+                preview.style = index
+                // 极轻的淡入：让"换了风格"这件事被眼睛确认到，又不至于让连续点击变得拖沓
+                Ui.enter(preview, fromDp = 0f, duration = 140)
+                TimetableRepository.notifyDataChanged(this@SettingsActivity)
+            }
+            addView(chips.view)
         }
 
         // ---------------- 周末底色 ----------------
         sectionTitle("周末底色")
         card {
             row("周六周日那一列", "要不要跟工作日区分开")
-            addView(
-                chipGrid(Prefs.WEEKEND_NAMES, Prefs.weekendMode) { index ->
-                    Prefs.weekendMode = index
-                    TimetableRepository.notifyDataChanged(this@SettingsActivity)
-                    build()
-                }
-            )
+            val chips = chipGridLive(Prefs.WEEKEND_NAMES, Prefs.weekendMode) { index ->
+                Prefs.weekendMode = index
+                // 上面那张风格样片也画着周末列，它虽然读的是 Prefs 但不会自己重画
+                stylePreview?.invalidate()
+                TimetableRepository.notifyDataChanged(this@SettingsActivity)
+            }
+            addView(chips.view)
         }
 
         // ---------------- 背景 ----------------
@@ -405,15 +543,258 @@ class SettingsActivity : BaseActivity() {
                 "少数系统（如荣耀）回报的组件高度不准，应用只能保守地少排几行。" +
                     "把上面改成「3 行」或「4 行」即可填满 —— 你定几行就显示几行。"
             )
+
+            // ---- 每日一句（默认关闭）----
+            row(
+                "每日一句",
+                "在课程列表下方的空白处显示一句话（内置、离线，不联网）",
+                Switch(this@SettingsActivity).apply {
+                    isChecked = Prefs.quoteEnabled
+                    setOnCheckedChangeListener { _, checked ->
+                        Prefs.quoteEnabled = checked
+                        TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                        build()
+                    }
+                }
+            )
+
+            // ---- 图片框（默认关闭）----
+            row(
+                "图片",
+                "在小组件底部显示你选的图片（最多 ${WidgetData.MAX_PHOTOS} 张）",
+                Switch(this@SettingsActivity).apply {
+                    isChecked = Prefs.photoEnabled
+                    setOnCheckedChangeListener { _, checked ->
+                        Prefs.photoEnabled = checked
+                        TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                        build()
+                    }
+                }
+            )
+            if (Prefs.photoEnabled) {
+                val count = WidgetData.photoList(this@SettingsActivity).count { java.io.File(it).exists() }
+                row(
+                    "选择图片（$count/${WidgetData.MAX_PHOTOS}）",
+                    "从相册挑；会压缩到 1600px 并复制进 App，卸载即清"
+                ) { pickPhotos() }
+                if (count > 0) {
+                    row("清除图片", "从小组件里移除全部图片") {
+                        WidgetPhotos.clear(this@SettingsActivity)
+                        TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                        build()
+                    }
+                }
+                row(
+                    "自动轮播",
+                    if (count <= 1) {
+                        "只有 1 张图片时轮播没有任何效果 —— 再选几张才会转起来"
+                    } else {
+                        "小组件里唯一能自动切换图片的方式（横向滑动做不到，启动器会接管手势）"
+                    },
+                    Switch(this@SettingsActivity).apply {
+                        isEnabled = count > 1
+                        isChecked = Prefs.photoFlipEnabled && count > 1
+                        setOnCheckedChangeListener { _, checked ->
+                            Prefs.photoFlipEnabled = checked
+                            TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                            build()
+                        }
+                    }
+                )
+                if (Prefs.photoFlipEnabled) {
+                    addView(
+                        chipGrid(
+                            Prefs.photoFlipChoices.map { "$it 秒" },
+                            // 存量值可能不在选项列表里（老版本写进 prefs 的），
+                            // indexOf 会返回 -1；直接 coerceAtLeast(0) 会"高亮成 5 秒"，
+                            // 而实际仍按老值轮播 —— 那就对不上了，所以先落到默认值上再取下标
+                            Prefs.photoFlipChoices
+                                .indexOf(Prefs.photoFlipSeconds)
+                                .takeIf { it >= 0 } ?: 0
+                        ) { index ->
+                            Prefs.photoFlipSeconds = Prefs.photoFlipChoices[index]
+                            TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                            build()
+                        }
+                    )
+                }
+            }
+
+            // ---- 余量判断（少数机型上报高度不准时的兜底）----
+            if (Prefs.quoteEnabled || Prefs.photoEnabled) {
+                row(
+                    "下方空白判断",
+                    "自动 = 按系统给的高度算余量；显示不出来时改成「强制显示」"
+                )
+                // 取值不单调（自动=0、强制显示=+1、强制隐藏=-1），所以**不能**用 index±1 换算：
+                // 那样三个选项会整体错位一格（默认高亮成「强制显示」，点「自动」反而强制隐藏）。
+                addView(
+                    chipGrid(
+                        OVERRIDE_LABELS,
+                        OVERRIDE_VALUES.indexOf(Prefs.widgetExtrasOverride).coerceAtLeast(0)
+                    ) { index ->
+                        Prefs.widgetExtrasOverride = OVERRIDE_VALUES[index]
+                        TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                        build()
+                    }
+                )
+            }
         }
     }
 
+    // ------------------------------------------------- 节日祝福与全年日历
+
+    /**
+     * 节日祝福 + 全年日历。
+     *
+     * 设计取舍：
+     *  - **总开关默认关**。这功能是"锦上添花"，默认弹窗会打扰大多数只想看课表的同学；
+     *  - 打开后**公历默认开、农历和校历默认关** —— 公历节日人人都认，
+     *    农历和校历节点属于"你说了才给你看"的信息；
+     *  - 全年日历跟着总开关出现（关着时不占屏幕高度），日历里的小圆点按类别上色，
+     *    和上面的三个开关一一对应，用户能立刻看出自己关掉了哪一类。
+     */
+    private fun buildGreeting() {
+        sectionTitle("节日祝福")
+
+        // 局部扩展函数：卡片内部就是 LinearLayout；注意 row() 自己会把行加进卡片，不要再包 addView
+        fun LinearLayout.switchRow(
+            title: String,
+            subtitle: String,
+            value: Boolean,
+            set: (Boolean) -> Unit
+        ) {
+            row(
+                title,
+                subtitle,
+                Switch(this@SettingsActivity).apply {
+                    isChecked = value
+                    setOnCheckedChangeListener { _, checked ->
+                        set(checked)
+                        build()
+                    }
+                }
+            )
+        }
+
+        card {
+            switchRow(
+                "节日祝福",
+                "节日当天打开 App 时弹一句祝福（内置，不联网）",
+                Prefs.greetEnabled
+            ) { Prefs.greetEnabled = it }
+
+            if (!Prefs.greetEnabled) {
+                row("全年日历", "打开上面的开关后，这里会显示一整年的节日日历")
+                return@card
+            }
+
+            switchRow("公历节日", "元旦、劳动节、国庆节等", Prefs.greetSolar) { Prefs.greetSolar = it }
+            switchRow(
+                "农历节日",
+                "春节、元宵、端午、七夕、中秋、重阳、腊八等",
+                Prefs.greetLunar
+            ) { Prefs.greetLunar = it }
+            switchRow(
+                "校历节点",
+                "开学、期中期末、寒暑假等（参考节点，非官方校历）",
+                Prefs.greetSchool
+            ) { Prefs.greetSchool = it }
+
+            row(
+                "全年日历",
+                "圆点颜色对应上面的类别：公历 / 农历 / 校历。点某天可以看到当天的节日。"
+            )
+            addView(
+                YearCalendarView(this@SettingsActivity).apply {
+                    setGreetFlags(Prefs.greetSolar, Prefs.greetLunar, Prefs.greetSchool)
+                    onDayTap = { date -> showDayHolidays(date) }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        marginStart = dp(16); marginEnd = dp(16)
+                        topMargin = dp(6); bottomMargin = dp(14)
+                    }
+                }
+            )
+        }
+    }
+
+    /** 点日历上的某天：列出当天的节日（只看已启用的类别） */
+    private fun showDayHolidays(date: LocalDate) {
+        val hits = Holidays.of(date).filter { kind ->
+            when (kind.kind) {
+                Holidays.Kind.SOLAR -> Prefs.greetSolar
+                Holidays.Kind.LUNAR -> Prefs.greetLunar
+                Holidays.Kind.SCHOOL -> Prefs.greetSchool
+            }
+        }
+        val head = "${date.monthValue} 月 ${date.dayOfMonth} 日 · " +
+            Session.dayLabel(date.dayOfWeek.value)
+        val lunar = LunarCalendar.label(date)
+        val body = if (hits.isEmpty()) {
+            "$head\n$lunar\n\n这天没有节日。"
+        } else {
+            "$head\n$lunar\n\n" + hits.joinToString("\n\n") { "${it.name}\n${it.greeting}" }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("这一天")
+            .setMessage(body)
+            .setPositiveButton("好", null)
+            .show()
+    }
+
+    // ------------------------------------------------- 小组件图片选择
+
+    private val REQ_PHOTOS = 0x9A01
+
+    private fun pickPhotos() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            type = "image/*"
+            addCategory(Intent.CATEGORY_OPENABLE)
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        runCatching { startActivityForResult(intent, REQ_PHOTOS) }
+            .onFailure { toast("这台设备没有可用的相册选择器") }
+    }
+
+
     /** 三列一行的可选项 */
-    private fun chipGrid(names: List<String>, selected: Int, onPick: (Int) -> Unit): LinearLayout {
+    private fun chipGrid(names: List<String>, selected: Int, onPick: (Int) -> Unit): LinearLayout =
+        chipGridLive(names, selected, onPick).view
+
+    /**
+     * 不重建页面就能改选中态的 chip 网格。
+     *
+     * 为什么需要：[chipGrid] 把"选中态"烘进了每个 chip 的文案与背景里，所以传统做法是
+     * 「点一下 → 改设置 → 全页 build()」。挑风格、切周末底色这类动作用户会**连续点好几下**，
+     * 每点一次整页重建会让设置页反复闪、滚动位置也可能跳 —— 这正是"不丝滑"的来源。
+     * 这里返回一个 refresh：调用方自己决定是"只更新选中态"还是"顺便重建别的区域"。
+     */
+    private class ChipGrid(val view: LinearLayout, val refresh: (Int) -> Unit)
+
+    private fun chipGridLive(
+        names: List<String>,
+        selected: Int,
+        onPick: (Int) -> Unit
+    ): ChipGrid {
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(4), dp(12), dp(12))
         }
+        val chips = ArrayList<TextView>(names.size)
+
+        // 选中态：✓ 前缀 + 强调色背景。点一下自己就把选中态画好（不需要调用方重建页面）
+        fun paint(picked: Int) {
+            chips.forEachIndexed { index, chip ->
+                val on = index == picked
+                chip.text = if (on) "✓ ${names[index]}" else names[index]
+                chip.setTextColor(color(if (on) R.color.accent else R.color.text_secondary))
+                chip.background = getDrawable(if (on) R.drawable.bg_accent_chip else R.drawable.bg_pill)
+            }
+        }
+
         var line: LinearLayout? = null
         names.forEachIndexed { index, name ->
             if (index % 3 == 0) {
@@ -423,18 +804,19 @@ class SettingsActivity : BaseActivity() {
                 }
                 wrap.addView(line)
             }
-            val picked = index == selected
             val chip = TextView(this).apply {
-                text = if (picked) "✓ $name" else name
+                text = name
                 textSize = 13f
                 gravity = Gravity.CENTER
-                setTextColor(color(if (picked) R.color.accent else R.color.text_secondary))
-                background = getDrawable(if (picked) R.drawable.bg_accent_chip else R.drawable.bg_pill)
                 isClickable = true
                 isFocusable = true
                 setPadding(dp(10), dp(10), dp(10), dp(10))
-                setOnClickListener { onPick(index) }
+                setOnClickListener {
+                    paint(index)
+                    onPick(index)
+                }
             }
+            chips += chip
             line!!.addView(
                 chip,
                 LinearLayout.LayoutParams(0, WRAP, 1f).apply {
@@ -443,7 +825,8 @@ class SettingsActivity : BaseActivity() {
                 }
             )
         }
-        return wrap
+        paint(selected)
+        return ChipGrid(wrap) { paint(it) }
     }
 
     /** 底色色板：4 浅 4 深 */
@@ -531,6 +914,32 @@ class SettingsActivity : BaseActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        // 小组件图片（可多选）
+        if (requestCode == REQ_PHOTOS) {
+            if (resultCode != RESULT_OK || data == null) return
+            val uris = ArrayList<android.net.Uri>()
+            data.clipData?.let { clip ->
+                for (i in 0 until clip.itemCount) uris.add(clip.getItemAt(i).uri)
+            }
+            data.data?.let { if (uris.isEmpty()) uris.add(it) }
+            if (uris.isEmpty()) return
+
+            toast("正在导入 ${uris.size} 张图片…")
+            // 解码大图会阻塞几百毫秒，放后台线程；完成后回主线程刷新界面与小组件
+            Thread {
+                val saved = runCatching { WidgetPhotos.import(this, uris) }.getOrDefault(emptyList())
+                WidgetPhotos.prune(this)
+                runOnUiThread {
+                    toast("已导入 ${saved.size} 张图片")
+                    TodayWidgetProvider.refreshAll(this)
+                    build()
+                }
+            }.start()
+            return
+        }
+
+        // 课表背景图
         if (requestCode != REQ_PICK || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         // 持久化权限，否则重启后读不到这张图
@@ -566,6 +975,21 @@ class SettingsActivity : BaseActivity() {
                     .setNegativeButton("取消", null)
                     .show()
             }
+            row(
+                "界面动效",
+                "切周、切换课表风格时的淡入过渡。关掉后所有切换瞬间完成",
+                Switch(this@SettingsActivity).apply {
+                    isChecked = Prefs.animEnabled
+                    setOnCheckedChangeListener { _, checked ->
+                        Prefs.animEnabled = checked
+                        // 立刻给个反馈，用户能马上看到开/关的差别
+                        if (checked) {
+                            binding.container.alpha = 0f
+                            Ui.enter(binding.container, fromDp = 0f, duration = 160)
+                        }
+                    }
+                }
+            )
             row("关于", "兰大课表 $versionLabel") {
                 AlertDialog.Builder(this@SettingsActivity)
                     .setTitle("关于")
@@ -657,10 +1081,16 @@ class SettingsActivity : BaseActivity() {
     }
 
     /** 在卡片内加一个左右留白的控件（间距必须走 LayoutParams，View 没有 margin） */
-    private fun LinearLayout.addPadded(v: View, horizontal: Int = 16, bottom: Int = 6) {
+    private fun LinearLayout.addPadded(
+        v: View,
+        horizontal: Int = 16,
+        bottom: Int = 6,
+        /** > 0 时给固定高度（dp）；0 = wrap_content */
+        heightDp: Int = 0
+    ) {
         addView(
             v,
-            LinearLayout.LayoutParams(MATCH_PARENT, WRAP).apply {
+            LinearLayout.LayoutParams(MATCH_PARENT, if (heightDp > 0) dp(heightDp) else WRAP).apply {
                 marginStart = dp(horizontal)
                 marginEnd = dp(horizontal)
                 bottomMargin = dp(bottom)
