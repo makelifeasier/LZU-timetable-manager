@@ -355,12 +355,49 @@ internal object PhotoBitmap {
      * 图片区**背后那一层**的颜色（ARGB）—— 根布局的背景（[WidgetColors.widgetBg]）。
      *
      * 这一层就是照片四个角"本该露出来"的东西（容器是圆角矩形，四个角它没涂到，见 [cornerFillArgb]）。
-     * 读法是从 shape drawable 的 solid 里取，读不到才用兜底常量。
+     * 读法是从 shape drawable 的 solid 里取。
+     *
+     * ## 只认**完全不透明**的实色
+     *
+     * 读不到（null）、读到 0、或者 alpha 不是 255 时一律退兜底常量。理由是踩过的坑：
+     * `Canvas.drawPath` 用的是 src-over，**alpha=0 的"颜色"等于什么都不画**（不报错、不留痕），
+     * 表现就是"照片四角还是直角" —— 而这正是用户反馈的现象。宁可退一个已知的实色，
+     * 也绝不让填色变成"空操作"。
      */
     fun behindColorArgb(context: Context, colors: WidgetColors): Int {
         val solid = solidColorOf(context, colors.widgetBg)
-        if (solid != null) return solid
+        if (solid != null && (solid ushr 24) == 0xFF) return solid
         return if (colors.dark) FALLBACK_BEHIND_DARK else FALLBACK_BEHIND_LIGHT
+    }
+
+    /**
+     * 纯函数（可单测）：把填色**强制成不透明**。
+     *
+     * 为什么必须强制：位图是 RGB_565（没有 alpha 通道），而 `Canvas.drawPath` 走 src-over ——
+     * 传进去的颜色如果 alpha=0（读不到颜色、CSL 没有默认色、兜底值被写成 0……），
+     * 绘制就是**空操作**：不报错、不留痕，照片四角保持直角。这类"静默失败"在真机上极难定位
+     * （用户只看到"还是直角"），所以在这里把 alpha 顶成 255：反正图片区背后那一层是不透明的，
+     * 填色本来就不该带透明。
+     */
+    fun opaqueArgb(argb: Int): Int = argb or (0xFF shl 24)
+
+    /**
+     * 纯函数（可单测）：圆角那条**极细弧线**的颜色 —— 由填色按亮度往对面偏一点。
+     *
+     * 为什么要它：四角填的是组件背景色（明色主题是纯白）。照片角落里如果也偏亮
+     * （白墙、天空、纸张），圆角就会"融进背景"、看起来仍像直角 —— 用户实测反馈过这一条。
+     * 这条线跟着填色走：浅底往暗偏 14%、深底往亮偏 14%，所以任何照片上都能看出圆角，
+     * 又细到不会变成一圈边框。一律不透明（RGB_565 没有 alpha，半透明等于没画）。
+     */
+    fun arcLineArgb(fillArgb: Int): Int {
+        val r = (fillArgb shr 16) and 0xFF
+        val g = (fillArgb shr 8) and 0xFF
+        val b = fillArgb and 0xFF
+        // 感知亮度：决定"往黑偏"还是"往白偏"
+        val lum = (r * 299 + g * 587 + b * 114) / 1000
+        val toward = if (lum > 140) 0 else 255
+        fun mix(c: Int) = (c + (toward - c) * 0.14f).toInt().coerceIn(0, 255)
+        return (0xFF shl 24) or (mix(r) shl 16) or (mix(g) shl 8) or mix(b)
     }
 
     /** 读一个 shape drawable 的 `solid` 颜色；不是 [GradientDrawable] / 读不到 → null */
@@ -444,10 +481,72 @@ internal object PhotoBitmap {
     }
 
     /**
+     * 一个角的**楔形几何**（纯数据，可单测）：圆心 / 半径 / 弧的起始角与扫过角 / 方角区的角点。
+     *
+     * 把它做成纯数据是为了**能在单测里验角度**：弧的两个端点由 `圆心 + 半径 × (cos 角, sin 角)`
+     * 推出来，单测反过来用端点反查角度 —— 手写的起始角/扫过角一旦写反（那是最容易犯、
+     * 且只能在真机上看出来的错），这里立刻红。
+     */
+    internal class CornerWedge(
+        val centerX: Float,
+        val centerY: Float,
+        val radiusPx: Float,
+        /** 弧的起始角（度，0° = +x 方向，顺时针为正 —— 与 Android 的坐标系一致） */
+        val startAngle: Float,
+        /** 弧扫过的角度（度，正数 = 顺时针） */
+        val sweepAngle: Float,
+        /** 方角区里那个直角顶点（四角的角点，圆心在它的对角方向上） */
+        val cornerX: Float,
+        val cornerY: Float
+    ) {
+        /** 弧的起点 = 圆心 + 半径 × (cos 起始角, sin 起始角) */
+        val fromX: Float get() = pointAt(startAngle)[0]
+        val fromY: Float get() = pointAt(startAngle)[1]
+
+        /** 弧的终点 = 圆心 + 半径 × (cos(起始角+扫过角), sin(起始角+扫过角)) */
+        val toX: Float get() = pointAt(startAngle + sweepAngle)[0]
+        val toY: Float get() = pointAt(startAngle + sweepAngle)[1]
+
+        fun pointAt(angleDeg: Float): FloatArray {
+            val rad = Math.toRadians(angleDeg.toDouble())
+            return floatArrayOf(
+                (centerX + radiusPx * Math.cos(rad)).toFloat(),
+                (centerY + radiusPx * Math.sin(rad)).toFloat()
+            )
+        }
+    }
+
+    /**
+     * 纯函数（可单测）：四个角那四段"方角区 − 四分之一圆"的几何（左上 / 右上 / 右下 / 左下）。
+     *
+     * 记 `w × h` 是位图、`r` 是夹取后的半径：
+     * ```
+     * 左上：圆心 (r, r)      弧 180° → 270°（扫 +90）  角点 (0, 0)
+     * 右上：圆心 (w−r, r)    弧 270° → 360°（扫 +90）  角点 (w, 0)
+     * 右下：圆心 (w−r, h−r)  弧   0° →  90°（扫 +90）  角点 (w, h)
+     * 左下：圆心 (r, h−r)    弧 180° →  90°（扫 −90）  角点 (0, h)
+     * ```
+     * 四段合起来就是 [insideCornerMask] 描述的区域（也就是说：遮罩的区域只有这一处定义，
+     * 画的那一步只是把这四段的坐标喂给 `Path`）。
+     */
+    fun cornerWedges(mask: CornerMask): List<CornerWedge> {
+        val w = mask.width.toFloat()
+        val h = mask.height.toFloat()
+        val r = mask.radiusPx
+        if (mask.width <= 0 || mask.height <= 0 || r <= 0f) return emptyList()
+        return listOf(
+            CornerWedge(r, r, r, 180f, 90f, 0f, 0f),                 // 左上
+            CornerWedge(w - r, r, r, 270f, 90f, w, 0f),               // 右上
+            CornerWedge(w - r, h - r, r, 0f, 90f, w, h),              // 右下
+            CornerWedge(r, h - r, r, 180f, -90f, 0f, h)               // 左下
+        )
+    }
+
+    /**
      * 遮罩的结果：位图 + **真正画上去**的半径（px）+ 角落里读回来的像素。
      *
-     * 为什么要带出半径：位图可能因为不可变（`decodeFile` 给的就是不可变位图）而 copy 失败、
-     * 或者几何运算失败，那时遮罩并没有生效 —— 日志里必须能看出来"这次没遮上"，否则用户拿着截图
+     * 为什么要带出半径：位图可能因为不可变（`decodeFile` 给的就是不可变位图）而 copy 失败，
+     * 那时遮罩并没有生效 —— 日志里必须能看出来"这次没遮上"，否则用户拿着截图
      * 取像素会以为是自己的眼睛有问题。0 = 没遮罩。
      *
      * [cornerPixel] 是遮罩之后从探针像素**实测**读回来的 ARGB（[NO_PIXEL] = 没读）：
@@ -469,26 +568,36 @@ internal object PhotoBitmap {
      * 圆角上 —— 用户原话："图片下部边角直角紧贴圆角，看起来很突兀"。照片自己带上圆角，
      * 两边就对齐了。
      *
-     * ## 怎么画（这一步的写法是有原因的，别改）
+     * ## 怎么画（这段写法改过两次，两次都是因为"静默失败"，别再简化）
      *
-     * 要涂的是"整张位图 − 圆角矩形"= 四角那四块（[insideCornerMask] 就是它的定义）。
-     * 这里**不**用"外框矩形 + 内圆角矩形两个子路径 + 填充规则"那种写法：
-     *  - 嵌套子路径配 `EVEN_ODD` 得到的确实是"环"，但配 `INVERSE_EVEN_ODD` 得到的却是
-     *    **圆角矩形内部** —— 那会把整张照片糊成一块底色。而单测里画布是假的，
-     *    这种错**测不出来**，只能在真机上看见一张纯色方块（比原来难看十倍）；
-     *  - 所以改用 [Path.op] 的 `DIFFERENCE`：区域几何由平台算，语义没有歧义，
-     *    也完全没有"填充规则"这一层。
+     * 要涂的是"整张位图 − 圆角矩形"= 四角那四块（[insideCornerMask] 是它的定义，
+     * [cornerWedges] 把它拆成四段可验证的几何）。这里**不用**任何"路径集合运算 / 填充规则"：
+     *  - 嵌套子路径 + `INVERSE_EVEN_ODD` 得到的是圆角矩形**内部**（会把整张照片糊成一块底色）；
+     *  - `Path.Op.DIFFERENCE` 语义没问题，但**它是个返回值**：失败时我这里只能"放弃遮罩"，
+     *    用户看到的就是"还是直角"，而日志里只有一行半径 0 —— 真机上极难定位（用户实测反馈
+     *    "4×4 的时候图片还是直角"就是这么来的）。
+     *
+     * 现在改成一劳永逸的写法：**四个角各画一段显式弧**（`moveTo 角点 → lineTo 弧起点 →
+     * arcTo 弧 → close`），坐标全部来自 [cornerWedges] 的纯算术 —— 没有分支、没有返回值、
+     * 不依赖平台几何运算，画不出来才是见鬼。
+     *
+     * 填色用 [opaqueArgb] 强制不透明：`drawPath` 是 src-over，**alpha=0 等于什么都不画**
+     * （同样静默），而图片区背后那一层本来就不透明。
      *
      * 抗锯齿用 `Paint.ANTI_ALIAS_FLAG`（弧边是曲线的，不抗锯齿就是一圈阶梯状锯齿）。
-     * 位图不可变时先 `copy(RGB_565, true)` 一次（`decodeFile` 给的位图是只读的）；
-     * copy 或几何运算失败就**原样返回**（方角照旧显示，不影响任何其它功能），半径记 0 让日志能看出来。
+     * 位图不可变时先 `copy(RGB_565, true)` 一次（`decodeFile` 给的位图是只读的）；copy 失败就
+     * **原样返回**（方角照旧显示，不影响任何其它功能），半径记 0 并且**打一条警告**。
      *
      * @param radiusPx 容器那张 drawable 的圆角半径（px）；≤ 0 / NaN → 不做遮罩
      * @param fillArgb 角落填什么颜色（[cornerFillArgb] 的结论）
      */
     fun maskCorners(src: Bitmap, radiusPx: Float, fillArgb: Int): MaskedPhoto {
         val mask = cornerGeometry(src.width, src.height, radiusPx)
-        if (mask.radiusPx <= 0f) return MaskedPhoto(src, 0f)
+        if (mask.radiusPx <= 0f) {
+            // 半径读不到（drawable 读不出来且密度为 0）：不遮罩。这一档只能靠日志的 `圆角=0px` 看出来
+            Log.w(TAG, "不做圆角遮罩：半径 ${radiusPx}px 无效（位图 ${src.width}x${src.height}）")
+            return MaskedPhoto(src, 0f)
+        }
 
         // RGB_565 是有意的：照片没有透明通道，ARGB 等于白送一半体积给 binder（见类注释）。
         // 不可变位图（decodeFile / createBitmap 的产物）要先转成可写的副本才能往上画。
@@ -496,52 +605,90 @@ internal object PhotoBitmap {
             src
         } else {
             runCatching { src.copy(Bitmap.Config.RGB_565, true) }.getOrNull()
-                ?: return MaskedPhoto(src, 0f)
+                ?: run {
+                    Log.w(
+                        TAG,
+                        "不做圆角遮罩：位图不可变且 copy 失败（${src.width}x${src.height}，" +
+                            "config=${configLabel(src)}）→ 照片四角会是直角"
+                    )
+                    return MaskedPhoto(src, 0f)
+                }
         }
 
-        val wedge = cornerWedgePath(mask) ?: return MaskedPhoto(target, 0f)
+        val fillColorForArc = opaqueArgb(fillArgb)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = fillArgb
+            this.color = fillColorForArc
             style = Paint.Style.FILL
         }
-        Canvas(target).drawPath(wedge, paint)
 
-        // 画完**自查一次**：挑一个判据说"该被遮掉"的像素读回来，它必须已经是填色。
-        // 单测里画布是假的 —— 这是真机上唯一能证明"遮罩真的画上去了"的地方；
-        // 平时不刷屏（正常情况由日志的 `角像素=` 那一列表达），对不上时才打一条警告。
+        // 画之前先记两个像素（画完比对用）：角落那个"该被填掉"的，与正中间那个"绝不该被填掉"的。
+        // 单测里画布是假的，这两次比对就是真机上唯一能证明"遮罩真的按预期画上去了"的东西。
         val probe = maskProbePixel(mask.width, mask.height, mask.radiusPx)
-        val cornerPixel = probe?.let {
-            runCatching { target.getPixel(it[0], it[1]) }.getOrNull()
-        } ?: NO_PIXEL
-        if (probe != null && cornerPixel != NO_PIXEL && !sameArgbWithin565(cornerPixel, fillArgb)) {
+        val cornerBefore = probe?.let { runCatching { target.getPixel(it[0], it[1]) }.getOrNull() }
+        val centerX = mask.width / 2
+        val centerY = mask.height / 2
+        val centerBefore = runCatching { target.getPixel(centerX, centerY) }.getOrNull()
+
+        val canvas = Canvas(target)
+        for (wedge in cornerWedges(mask)) {
+            val path = Path().apply {
+                moveTo(wedge.cornerX, wedge.cornerY)                  // 四角的角点（直角顶点）
+                lineTo(wedge.fromX, wedge.fromY)                      // 沿着位图边走到弧的起点
+                arcTo(
+                    wedge.centerX - wedge.radiusPx,
+                    wedge.centerY - wedge.radiusPx,
+                    wedge.centerX + wedge.radiusPx,
+                    wedge.centerY + wedge.radiusPx,
+                    wedge.startAngle, wedge.sweepAngle, false
+                )
+                close()                                               // 从弧的终点直着回到角点
+            }
+            canvas.drawPath(path, paint)
+        }
+
+        // 再沿弧线描一条**极细**的线。
+        //
+        // 为什么需要：四角填的是组件背景色（明色主题 = 纯白）。如果照片角落的内容也偏亮
+        // （白墙、天空、纸张），圆角就会"融进背景"、看起来仍像直角 —— 用户实测反馈过这一条。
+        // 这条线跟着填色走（浅底往暗、深底往亮），所以任何照片上都能看出圆角，
+        // 又细到不会变成一圈边框。
+        val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            // 注意 this.：外面那个 fillColor 的局部变量名就是 color，不加 this. 会被解析成对局部 val 赋值
+            this.color = arcLineArgb(fillColorForArc)
+            style = Paint.Style.STROKE
+            strokeWidth = (mask.radiusPx * 0.08f).coerceIn(1f, 2f)
+        }
+        for (wedge in cornerWedges(mask)) {
+            canvas.drawArc(
+                wedge.centerX - wedge.radiusPx,
+                wedge.centerY - wedge.radiusPx,
+                wedge.centerX + wedge.radiusPx,
+                wedge.centerY + wedge.radiusPx,
+                wedge.startAngle, wedge.sweepAngle, false, arcPaint
+            )
+        }
+
+        // ---- 画完的两个自查（对不上就打警告；平时不刷屏，正常值由日志的 `角像素=` 那一列表达）----
+        val cornerAfter = probe?.let { runCatching { target.getPixel(it[0], it[1]) }.getOrNull() }
+        if (probe != null && cornerAfter != null && !sameArgbWithin565(cornerAfter, fillColorForArc)) {
             Log.w(
                 TAG,
-                "圆角遮罩似乎没生效：角落像素 #${argbLabel(cornerPixel)} ≠ 填色 " +
-                    "#${argbLabel(fillArgb)}（探针 ${probe[0]},${probe[1]}，" +
-                    "位图 ${mask.width}x${mask.height} 半径 ${mask.radiusPx}px）"
+                "圆角遮罩没生效：角落像素 #${argbLabel(cornerAfter)} ≠ 填色 #${argbLabel(fillColorForArc)}" +
+                    "（探针 ${probe[0]},${probe[1]}，位图 ${mask.width}x${mask.height}，" +
+                    "半径 ${mask.radiusPx}px）→ 照片四角会是直角"
             )
         }
-        return MaskedPhoto(target, mask.radiusPx, cornerPixel)
-    }
-
-    /**
-     * "整张位图 − 圆角矩形"的路径（= [insideCornerMask] 描述的那四块）。
-     *
-     * 几何运算失败时返回 null → 调用方**放弃遮罩**：宁可留方角，也不要画错一块地方。
-     * （`Path.op` 是 API 19 起的标准几何运算，实战中不会失败；这条兜底是为了"绝不画出错误画面"。）
-     */
-    private fun cornerWedgePath(mask: CornerMask): Path? {
-        val outer = Path().apply {
-            addRect(0f, 0f, mask.width.toFloat(), mask.height.toFloat(), Path.Direction.CW)
-        }
-        val rounded = Path().apply {
-            addRoundRect(
-                0f, 0f, mask.width.toFloat(), mask.height.toFloat(),
-                mask.radiusPx, mask.radiusPx, Path.Direction.CW
+        val centerAfter = runCatching { target.getPixel(centerX, centerY) }.getOrNull()
+        if (centerBefore != null && centerAfter != null && centerBefore != centerAfter) {
+            // 这条防的是"方向画反了"：把圆角矩形**内部**填掉，整张照片会变成一块纯色。
+            // 比对的是"画之前 / 画之后"，所以照片本身恰好是背景色也不会误报。
+            Log.w(
+                TAG,
+                "圆角遮罩画反了：位图正中间 ($centerX,$centerY) 被涂成了 " +
+                    "#${argbLabel(centerAfter)}（画之前是 #${argbLabel(centerBefore)}）"
             )
         }
-        val wedge = Path()
-        return if (wedge.op(outer, rounded, Path.Op.DIFFERENCE)) wedge else null
+        return MaskedPhoto(target, mask.radiusPx, cornerAfter ?: NO_PIXEL)
     }
 
     /**

@@ -246,6 +246,109 @@ class PhotoCornerMaskTest {
         assertEquals(behind, PhotoBitmap.cornerFillArgb("?", behind))
     }
 
+    /**
+     * 四个角的**楔形几何**：圆心、半径、弧的起止角。
+     *
+     * 这一组是本轮最要紧的回归：弧的角度是手写的（180°/270°/0°/180°−90°），写反了
+     * 单测里画布是假的、看不出来，真机上就是"某个角没涂"或者"涂错了地方"。
+     * 所以这里用端点**反查**角度：`端点 = 圆心 + 半径 × (cos 角, sin 角)` 必须逐值成立。
+     */
+    @Test
+    fun everyWedgeArcStartsAndEndsExactlyWhereItsAnglesSay() {
+        val w = 594
+        val h = 189
+        val mask = PhotoBitmap.cornerGeometry(w, h, radiusPx)
+        val wedges = PhotoBitmap.cornerWedges(mask)
+        assertEquals("四个角一个都不能漏", 4, wedges.size)
+
+        for (wedge in wedges) {
+            // ① 端点必须**落在圆周上**（逐值反查角度：写反了这里立刻红）
+            for (p in listOf(
+                doubleArrayOf(wedge.fromX.toDouble(), wedge.fromY.toDouble()),
+                doubleArrayOf(wedge.toX.toDouble(), wedge.toY.toDouble())
+            )) {
+                val d = Math.hypot(p[0] - wedge.centerX, p[1] - wedge.centerY)
+                assertEquals(
+                    "端点 (${p[0]},${p[1]}) 到圆心 (${wedge.centerX},${wedge.centerY}) 的距离",
+                    wedge.radiusPx.toDouble(), d, 0.0001
+                )
+            }
+            // ② 四个关键点都必须落在位图内（越界就是画到别人的地盘上）
+            for (p in listOf(
+                floatArrayOf(wedge.fromX, wedge.fromY),
+                floatArrayOf(wedge.toX, wedge.toY),
+                floatArrayOf(wedge.cornerX, wedge.cornerY),
+                floatArrayOf(wedge.centerX, wedge.centerY)
+            )) {
+                assertTrue(
+                    "点 (${p[0]},${p[1]}) 跑到位图 $w x $h 外面了",
+                    p[0] >= 0f && p[1] >= 0f && p[0] <= w.toFloat() && p[1] <= h.toFloat()
+                )
+            }
+            // ③ 角点一定在圆外（= 属于要被填掉的那块），圆心一定在圆内（= 绝不能被填）
+            val toCorner = Math.hypot(
+                (wedge.cornerX - wedge.centerX).toDouble(),
+                (wedge.cornerY - wedge.centerY).toDouble()
+            )
+            assertTrue("角点必须在圆外：$toCorner vs r=${wedge.radiusPx}", toCorner > wedge.radiusPx)
+            // ④ 弧的中点也在圆周上（反查"扫过角"没写反、没多写）
+            val mid = wedge.pointAt(wedge.startAngle + wedge.sweepAngle / 2f)
+            val dMid = Math.hypot(
+                (mid[0] - wedge.centerX).toDouble(),
+                (mid[1] - wedge.centerY).toDouble()
+            )
+            assertEquals("弧中点到圆心", wedge.radiusPx.toDouble(), dMid, 0.0001)
+        }
+
+        // 顺序与坐标逐值钉住（改顺序 = 改画法，得显式改这条）
+        assertEquals(listOf(0f, w.toFloat(), w.toFloat(), 0f), wedges.map { it.cornerX })
+        assertEquals(listOf(0f, 0f, h.toFloat(), h.toFloat()), wedges.map { it.cornerY })
+        assertEquals(listOf(180f, 270f, 0f, 180f), wedges.map { it.startAngle })
+        assertEquals(listOf(90f, 90f, 90f, -90f), wedges.map { it.sweepAngle })
+        assertEquals(
+            listOf(radiusPx, radiusPx, radiusPx, radiusPx),
+            wedges.map { it.radiusPx }
+        )
+    }
+
+    /** 楔形几何与 [PhotoBitmap.insideCornerMask] 必须是同一个区域（一个定义、两处使用） */
+    @Test
+    fun theArcsAgreeWithTheWrittenRegionDefinition() {
+        val w = 120
+        val h = 90
+        val r = 20f
+        for (corner in PhotoBitmap.cornerWedges(PhotoBitmap.cornerGeometry(w, h, r))) {
+            // 扫描窗口 = **这个角的方角区**：由角点定（不能用圆心定 —— 左下/右下的圆心
+            // 在 x 上都不小于 r，拿它判断会把窗口算到对面去）
+            val x0 = if (corner.cornerX == 0f) 0 else w - r.toInt()
+            val y0 = if (corner.cornerY == 0f) 0 else h - r.toInt()
+            for (x in x0 until (x0 + r.toInt())) {
+                for (y in y0 until (y0 + r.toInt())) {
+                    val dx = (x + 0.5f) - corner.centerX
+                    val dy = (y + 0.5f) - corner.centerY
+                    val outsideDisc = dx * dx + dy * dy > r * r
+                    assertEquals(
+                        "像素 ($x,$y) 在圆外的判定与遮罩定义不一致",
+                        outsideDisc,
+                        PhotoBitmap.insideCornerMask(x, y, w, h, r)
+                    )
+                }
+            }
+        }
+    }
+
+    /** 填色的 alpha 必须被顶成不透明：`drawPath` 是 src-over，alpha=0 等于**什么都不画** */
+    @Test
+    fun theFillColourIsAlwaysForcedOpaque() {
+        // 明/暗两套背景都要原样保留颜色，只把 alpha 补成 FF
+        assertEquals(0xFFFFFFFF.toInt(), PhotoBitmap.opaqueArgb(0xFFFFFFFF.toInt()))
+        assertEquals(0xFF171A1F.toInt(), PhotoBitmap.opaqueArgb(0xFF171A1F.toInt()))
+        // 半透明 / 全透明（读不到颜色时的脏值）也必须变成不透明 —— 否则四角"涂了等于没涂"
+        assertEquals(0xFFFFFFFF.toInt(), PhotoBitmap.opaqueArgb(0x00FFFFFF))
+        assertEquals(0xFF000000.toInt(), PhotoBitmap.opaqueArgb(0))
+        assertEquals(0xFF123456.toInt(), PhotoBitmap.opaqueArgb(0x7F123456))
+    }
+
     @Test
     fun theFillColourIsWhatTheUserWillSampleInAScreenshot() {
         // 日志里 `角填色=#FFFFFFFF` / `角像素=#..` 这两个写法必须能被直接对着截图用：
@@ -339,43 +442,56 @@ class PhotoCornerMaskTest {
     // --------------------------------------------------------------- 5. 源码级不变量
 
     @Test
-    fun theMaskIsDrawnWithRealAntiAliasingAndAnUnambiguousRegion() {
+    fun theMaskIsDrawnWithPlainArcsAndNothingThatCanSilentlyFail() {
         // 单测里画布是假的，所以这几条只能守**源码级**不变量（与 PhotoBitmapTest 里
-        // `decodeEnforcesRgb565AndJudgesByTheRealByteCount` 同一套思路）：
-        //  · 抗锯齿：不用 ANTI_ALIAS_FLAG 的话弧边是一圈阶梯状锯齿，比直角还难看；
-        //  · 区域用 `Path.Op.DIFFERENCE`（整张位图 − 圆角矩形）：区域几何由平台算，没有歧义。
-        //    **绝不能**退回"嵌套子路径 + INVERSE_*"那种写法 —— 写成 INVERSE 得到的是圆角矩形
-        //    **内部**，会把整张照片糊成一块底色，而单测里看不出来，只能在真机上看见一张纯色方块；
-        //  · 半径由 cornerRadiusPx（读 drawable）给，并且过一遍 cornerGeometry（夹取）；
-        //  · 遮罩后的位图仍是 RGB_565（过 binder 的体积不能因为圆角而翻倍）；
-        //  · 画完要读一个探针像素自查（真机上唯一能证明"遮罩真的画上去了"）。
+        // `decodeEnforcesRgb565AndJudgesByTheRealByteCount` 同一套思路）。
+        //
+        // 这段实现改过两次，两次都是"静默失败"（不报错、不留痕，用户只看到"还是直角"）：
+        //  ① 嵌套子路径 + `INVERSE_EVEN_ODD`：方向反了会把圆角矩形**内部**填掉，
+        //     整张照片糊成一块底色；
+        //  ② `Path.Op.DIFFERENCE`：语义没错，但它**有返回值**，失败时只能放弃遮罩
+        //     （用户实测反馈"4×4 的时候图片还是直角"就是这类现象）。
+        // 所以现在的写法是**四个角各画一段显式弧**：坐标全部来自纯算术（cornerWedges），
+        // 没有分支、没有返回值、不依赖平台的路径集合运算。
         val src = listOf(
             File("src/main/java/app/timetable/widget/PhotoBitmap.kt"),
             File("app/src/main/java/app/timetable/widget/PhotoBitmap.kt")
         ).firstOrNull { it.isFile } ?: error("找不到 PhotoBitmap.kt（测试工作目录假设有变）")
         val text = src.readText()
-        assertTrue("必须用抗锯齿的 Paint", text.contains("Paint.ANTI_ALIAS_FLAG"))
-        assertTrue("区域必须用几何运算算出来", text.contains("Path.Op.DIFFERENCE"))
-        // 注意：这里查的是**代码形态**（`Path.FillType.INVERSE` / `setFillType`），
-        // 不是"文本里出现过 INVERSE_ 这个词" —— 文件里的注释正**有意**提到那条弯路
-        //（"写成 INVERSE_* 会把整张照片糊成一块底色"），那是给后来人看的警告。
+        // 先把注释去掉再比对：文件里的注释**有意**提到那两条弯路（留给后来人的警告），
+        // 而这条用例守的是**代码形态** —— 注释里写什么不管。
+        val code = text.lines()
+            .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
+            .joinToString("\n")
+        assertTrue("必须用抗锯齿的 Paint", code.contains("Paint.ANTI_ALIAS_FLAG"))
+        assertTrue("必须用显式弧画四个角", code.contains("arcTo("))
+        assertTrue("几何必须来自 cornerWedges（可单测那套）", code.contains("cornerWedges(mask)"))
         assertFalse(
-            "不能用 INVERSE_* 填充规则（那个方向会让整张照片被填成底色）",
-            text.contains("Path.FillType.INVERSE")
+            "不许用路径集合运算（它有返回值，失败就是静默不遮罩）",
+            code.contains("Path.Op.")
         )
-        assertFalse("这条路径压根不该设置填充规则", text.contains("setFillType"))
-        assertTrue("必须真的画圆角矩形", text.contains("addRoundRect"))
-        assertTrue("半径必须读 drawable（不是写死的数字）", text.contains("cornerRadius"))
-        assertTrue("半径必须先夹取", text.contains("cornerGeometry"))
+        assertFalse(
+            "不许用填充规则技巧（INVERSE 方向会让整张照片被填成底色）",
+            code.contains("Path.FillType.INVERSE")
+        )
+        assertFalse("这条路径压根不该设置填充规则", code.contains("setFillType"))
+        assertTrue("半径必须读 drawable（不是写死的数字）", code.contains("cornerRadius"))
+        assertTrue("半径必须先夹取", code.contains("cornerGeometry"))
         assertTrue(
             "遮罩后的位图必须仍是 RGB_565（ARGB 会让载荷翻倍，见类注释）",
-            text.contains("copy(Bitmap.Config.RGB_565, true")
+            code.contains("copy(Bitmap.Config.RGB_565, true")
         )
         assertTrue(
-            "四角填色必须来自调用方给的背景色，不能是写死的黑/白",
-            text.contains("color = fillArgb")
+            "填色必须是不透明的（alpha=0 的 drawPath 等于什么都不画）",
+            code.contains("opaqueArgb(fillArgb)")
         )
-        assertTrue("画完必须读一个探针像素自查", text.contains("maskProbePixel"))
+        assertFalse(
+            "不许把调用方给的颜色直接塞给 Paint（那就是 alpha=0 静默失效的入口）",
+            code.contains("color = fillArgb")
+        )
+        assertTrue("画完必须读探针像素自查（角落该被填掉）", code.contains("maskProbePixel"))
+        assertTrue("还要比对正中间（防止把整张照片糊成底色）", code.contains("centerBefore"))
+        assertTrue("两条自查对不上时都要打警告", code.contains("Log.w(TAG"))
     }
 
     @Test
