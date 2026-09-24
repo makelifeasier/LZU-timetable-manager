@@ -351,6 +351,96 @@ class WidgetExtrasPlanTest {
         assertTrue("同一档行数内，格子越高图片越大", boxAt(150) < boxAt(187) && boxAt(187) < boxAt(200))
     }
 
+    // ------------------------------------------------- 裁剪框：组件是几乘几
+
+    /**
+     * 用户原话：「注意组件是几乘几」。
+     *
+     * 裁剪框的**高**不是拍脑袋定的，而是把渲染链路（预留 → 行数 → 余量 → ExtrasPlanner）
+     * 原样走一遍算出来的（[WidgetData.photoFrameHeightDp] 的注释里写了为什么必须同源）。
+     * 这几条数字就是"4 列 × 2 行 / 4 列 × 3 行"这些真实格子下，用户在裁剪界面里会看到的框。
+     */
+    @Test
+    fun theCropFrameHeightMirrorsTheWidgetLayoutChain() {
+        // 4 列 × 2 行（内容宽 226dp、格子高 187dp）：
+        // 预留 = 理想图片高 127 + 6 = 133；行数 = (187 − 71 − 133)/38 → 0 → 夹到 1 行；
+        // 余量 = 187 − 71 − 38 = 78；框高 = min(理想 72, 余量 − 6)
+        assertEquals(72, WidgetData.photoFrameHeightDp(187, 226, 0, false, 0))
+        // 4 列 × 3 行（250dp 高）：行数仍是 1（预留把高度吃掉了），多出来的 63dp 全给图片
+        assertEquals(135, WidgetData.photoFrameHeightDp(250, 226, 0, false, 0))
+        // 最矮的格子（150dp）：余量 41dp → 框 35dp
+        assertEquals(35, WidgetData.photoFrameHeightDp(150, 226, 0, false, 0))
+        // 每日一句也开着：两块从同一个预算里分，图片被压到 50dp（25:22 的取舍见 ExtrasPlanner）
+        assertEquals(50, WidgetData.photoFrameHeightDp(187, 226, 0, true, 0))
+        // 用户把行数手动定成 3：预留不参与排行，图片拿剩下的（这里放不下 → 0）
+        assertEquals(0, WidgetData.photoFrameHeightDp(187, 226, 3, false, 0))
+    }
+
+    @Test
+    fun theCropFrameFallsBackWhenThePhotoAreaCannotBeShownAtAll() {
+        // 90dp 的最矮格子：收掉页脚后 49 + 38 = 87dp 全给了课程，图片区的余量只剩 3dp ——
+        // 连硬底线（32dp）都不到 → 图片区不显示 → 框高 0 → [PhotoCrop.frame] 退兜底 2:1
+        assertEquals(0, WidgetData.photoFrameHeightDp(90, 226, 0, false, 0))
+        val fallback = PhotoCrop.frame(226, WidgetData.photoFrameHeightDp(90, 226, 0, false, 0))
+        assertTrue("取不到图片区高度时必须退兜底", fallback.fallback)
+        assertEquals(2f, fallback.ratio, 0.0001f)
+        // 内容宽取不到（启动器不上报）时同样退兜底
+        assertTrue(PhotoCrop.frame(0, 72).fallback)
+        // "强制隐藏"档位（-1）也会把图片区压成 0 —— 此时裁剪界面用兜底比例，
+        // 渲染那边同样按裁剪图自己的比例重新判定，所以不会显示错乱
+        assertEquals(0, WidgetData.photoFrameHeightDp(187, 226, 0, false, -1))
+        assertTrue(PhotoCrop.frame(226, 0).fallback)
+    }
+
+    @Test
+    fun aPhotoCroppedWithThisFrameIsShownWholeAndFillsTheBox() {
+        // 整条链路（纯函数版）：格子 4×2 → 裁剪框 226:72dp → 用户按这个框裁一张 →
+        // 存盘 720×229 → 组件要解码 594×189 → 渲染判定"放得下" → **整张、铺满、零留边**。
+        // 这就是这次改动的全部目的：用户裁的那一块，在组件里一字不差地出现。
+        val frameHeight = WidgetData.photoFrameHeightDp(187, 226, 0, false, 0)
+        val frame = PhotoCrop.frame(226, frameHeight)
+        assertEquals("226:72dp(3.14:1)", frame.label)
+
+        val target = PhotoBitmap.targetPx(226, frameHeight, 2.625f)
+        assertEquals("组件要解码的宽", 594, target[0])
+        assertEquals("组件要解码的高", 189, target[1])
+
+        val saved = PhotoCrop.encodeSize(frame, target[0])
+        assertEquals("存盘尺寸（按裁剪框比例，长边不超过导入链路的 1600）", "720x229", "${saved[0]}x${saved[1]}")
+
+        val layout = PhotoFit.layout(saved[0], saved[1], target[0], target[1])!!
+        assertTrue("必须是完整显示，不能再裁", layout.whole)
+        assertEquals("产出逐值等于框宽", 594, layout.outWidth)
+        assertEquals("产出逐值等于框高", 189, layout.outHeight)
+        assertEquals("零留边", 0, layout.padY)
+        assertEquals("整张都在", "720x229@(0,0)", layout.window.toString())
+    }
+
+    @Test
+    fun resizingTheWidgetLaterOnlyEverShowsMoreOrCropsCentred() {
+        // 用户裁完以后又拖了组件尺寸：这时"框"与"裁剪图"的比例不再相等，
+        // 两种结果都必须是可预期的：更高 → 完整显示（留边）；更扁 → 居中取一块。
+        val frame = PhotoCrop.frame(226, 72)
+        val saved = PhotoCrop.encodeSize(frame, 594)          // 720×229（3.14:1）
+
+        // 组件被拉高（图片区 100dp → 框 594×263px，2.26:1）：放得下 → 整张 + 上下留边
+        val taller = PhotoFit.layout(saved[0], saved[1], 594, 263)!!
+        assertTrue("框比图高 → 完整显示", taller.whole)
+        assertEquals("宽仍逐值等于框宽", 594, taller.outWidth)
+        assertEquals(189, taller.outHeight)                   // 按图自身比例
+        assertEquals(74, taller.padY)
+
+        // 组件被压扁（图片区 40dp → 框 594×105px，5.66:1）：放不下 → 居中取一块填满
+        val flatter = PhotoFit.layout(saved[0], saved[1], 594, 105)!!
+        assertFalse("框比图扁 → 取中间块", flatter.whole)
+        assertEquals(594, flatter.outWidth)
+        assertEquals(105, flatter.outHeight)
+        // 窗口仍是整宽、比例与框一致、居中
+        assertEquals(720, flatter.window.width)
+        assertEquals(127, flatter.window.height)              // round(720 ÷ 5.657)
+        assertEquals(51, flatter.window.y)                    // round((229 − 127) ÷ 2)
+    }
+
     // ------------------------------------------------- 代码常量 ↔ 布局 XML
 
     @Test

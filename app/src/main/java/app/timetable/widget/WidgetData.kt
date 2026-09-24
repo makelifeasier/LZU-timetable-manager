@@ -396,6 +396,81 @@ internal object WidgetData {
         return (availableDp - gapDp).coerceIn(0, hardMax)
     }
 
+    // ------------------------------------------- 裁剪框：组件是几乘几 → 框是什么形状
+
+    /**
+     * 当前尺寸下**裁剪框**的形状：用户在导入图片时看到的那个框，就是小组件图片区的形状。
+     *
+     * 用户原话：「注意组件是几乘几」。这里不能写死 16:9 / 2:1 —— 桌面上的小组件占
+     * `W 列 × H 行`，但**一格多少像素由启动器决定**，所以只有
+     * `AppWidgetManager.getAppWidgetOptions(id)` 报上来的 dp 尺寸才是真的
+     * （[contentWidthDp] 与 [widgetHeightDp] 都走这条路）。
+     *
+     * 比例 = 图片区**内容宽** : 图片区**可用高**（[photoFrameHeightDp]）。
+     * 取不到尺寸时由 [PhotoCrop.frame] 给兜底 2:1（理由写在那边的注释里）。
+     */
+    fun photoFrame(context: Context): CropFrame =
+        PhotoCrop.frame(contentWidthDp(context), photoFrameHeightDp(context))
+
+    /** 当前尺寸下图片区能用多高（dp）—— 就是裁剪框的"高" */
+    fun photoFrameHeightDp(context: Context): Int {
+        Prefs.init(context)
+        return photoFrameHeightDp(
+            heightDp = widgetHeightDp(context),
+            contentWidthDp = contentWidthDp(context),
+            manualRows = manualRows(context),
+            quoteEnabled = Prefs.quoteEnabled,
+            override = Prefs.widgetExtrasOverride,
+            slotDp = naturalSlotDp(context)
+        )
+    }
+
+    /**
+     * 纯函数（可单测）：这个尺寸下图片区**能用多高**（dp）。
+     *
+     * ## 为什么它不是"另算一套"，而是渲染链路的镜像
+     *
+     * 让裁剪框和组件里那一块**同形**是这次改动的全部目的：用户在框里选的那一块，
+     * 落到组件里就该原样出现（渲染时判到"放得下"，一分都不再裁）。所以这里刻意把
+     * [WidgetExtras.plan] 那条链路的每一步都抄了一遍、而不是取个近似值：
+     *
+     * ```
+     * 预留 = 理想图片高（16:9）+ 6dp 上边距        ← 与 photoReserveDp 同源
+     * 行数 = rowsFor(高度, 手动行数, 行高, 预留)     ← 与 visibleRows 同源（含"先扣预留"）
+     * 余量 = 高度 − 头部/页脚 − 行数 × 行高          ← 与 extraSpaceDp 同源
+     * 框高 = ExtrasPlanner 从余量里分给图片的那一份  ← 与 WidgetExtras.plan 同源
+     * ```
+     *
+     * **图片张数按 1 算**（[ExtrasPlanner.plan] 的 `photoCount = 1`）：这个方法是在
+     * 用户**正要导入第一张图**的时候调的，此刻组件里可能一张图都还没有，
+     * 按真实张数算会得到"图片区不存在、高度 0"，框就退化成兜底比例了 ——
+     * 而"导入之后组件会是什么样"才是用户真正在裁的形状。
+     *
+     * 注意它**不依赖任何偏好开关**之外的东西，也不写回任何状态（纯函数）：
+     * 单测可以直接喂"4 列 × 2 行"（226×187dp 之类）的尺寸，逐值验证比例。
+     */
+    fun photoFrameHeightDp(
+        heightDp: Int,
+        contentWidthDp: Int,
+        manualRows: Int,
+        quoteEnabled: Boolean,
+        override: Int,
+        slotDp: Float = ROW_SLOT_DP
+    ): Int {
+        val reserve = photoHeightForWidthDp(contentWidthDp) + AREA_GAP_DP
+        val rows = rowsFor(heightDp, manualRows, slotDp, reserve)
+        val chrome = if (compactFor(heightDp, manualRows, slotDp)) CHROME_DP - FOOTER_DP else CHROME_DP
+        val avail = (heightDp - chrome - rows * slotDp).toInt()
+        return ExtrasPlanner.plan(
+            override = override,
+            quoteEnabled = quoteEnabled,
+            photoEnabled = true,
+            photoCount = 1,
+            availableDp = avail,
+            idealPhotoDp = photoBoxTargetDp(avail, contentWidthDp)
+        ).photoHeightDp
+    }
+
     /**
      * 列表下方还剩多少 dp 可用。
      *

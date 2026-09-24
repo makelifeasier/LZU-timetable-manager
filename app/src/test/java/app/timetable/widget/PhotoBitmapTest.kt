@@ -67,6 +67,43 @@ class PhotoBitmapTest {
         assertTrue(PhotoBitmap.MAX_BITMAP_BYTES <= 512 * 1024)
     }
 
+    @Test
+    fun theBudgetIsThreeHundredKilobytesBecauseRealDeviceBitmapsWereLargerThanEstimated() {
+        // 真机事故：917×137 的图日志里是 491KB（ARGB_8888），而按 2 字节/像素估是 251KB。
+        // 预算因此压到 300KB —— binder 上限约 1MB，位图只是 RemoteViews 里的**一项**。
+        assertEquals(300 * 1024, PhotoBitmap.MAX_BITMAP_BYTES)
+        // 但不能紧到把最常见的那个框（4 列 × 2 行 → 917×137 的 RGB_565 = 245KB）判出去
+        assertTrue(
+            "917×137 的 RGB_565 必须塞得进预算",
+            917 * 137 * PhotoBitmap.BYTES_PER_PIXEL <= PhotoBitmap.MAX_BITMAP_BYTES
+        )
+    }
+
+    @Test
+    fun decodeEnforcesRgb565AndJudgesByTheRealByteCount() {
+        // `inPreferredConfig = RGB_565` 只是**建议**：源图带 alpha 通道时（PNG/相册截图），
+        // 解码器照样给 ARGB_8888 —— 这就是真机上"图明明不大、载荷却翻倍"的原因，
+        // 也是"小组件无法显示"（整次 RemoteViews 更新被 binder 丢掉）的直接来源。
+        //
+        // 单测里没有真 Bitmap（Android API 全是"返回默认值"的假实现），所以这里守的是
+        // **源码级不变量**：解码后必须有一步强制转 RGB_565，预算必须按真实 byteCount 判。
+        // 真正的验证在真机日志的 `config=` 与 `byteCount=` 两列上。
+        val src = listOf(
+            File("src/main/java/app/timetable/widget/PhotoBitmap.kt"),
+            File("app/src/main/java/app/timetable/widget/PhotoBitmap.kt")
+        ).firstOrNull { it.isFile } ?: error("找不到 PhotoBitmap.kt（测试工作目录假设有变）")
+        val text = src.readText()
+        assertTrue(
+            "解码后必须强制统一成 RGB_565（copy 的那一步）",
+            text.contains("copy(Bitmap.Config.RGB_565")
+        )
+        assertTrue(
+            "预算兜底必须按真实 byteCount 判，而不是按「像素数 × 2」估算",
+            text.contains("src.byteCount") && text.contains("fitBudget")
+        )
+        assertTrue("日志里必须打真实像素格式", text.contains("config?.name"))
+    }
+
     // ------------------------------------------------------ inSampleSize
 
     @Test

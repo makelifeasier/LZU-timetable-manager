@@ -2,7 +2,6 @@ package app.timetable.widget
 
 import android.app.PendingIntent
 import android.content.Context
-import android.graphics.Bitmap
 import android.util.Log
 import android.util.TypedValue
 import android.view.View
@@ -16,33 +15,28 @@ import java.io.File
  *
  * 单独抽出来是因为这段逻辑全在跟 RemoteViews 的限制打交道，塞进 build() 会很吵。
  *
- * ## 这一轮的三处变化（全部来自真机反馈）
+ * ## 一路走到这一轮，图片区踩过哪些坑
  *
- * 1. **图片区没有"轮播控件"了**。以前开关打开时这里会 `setRemoteAdapter` 到一个
+ * 1. **图片区没有"轮播控件"**。以前开关打开时这里会 `setRemoteAdapter` 到一个
  *    `AdapterViewFlipper`：它是个可滚动的 AdapterView，会吃掉竖直手势，
  *    课程列表就滑不动了（"自动轮播启动后小组件无法使用"）。现在图片区永远是同一个
  *    ImageView，**点一下换下一张**（[TodayWidgetProvider.ACTION_NEXT_PHOTO]）。
  * 2. **图片框高度不再是固定的"理想值"**，而是"列表下方真实剩下的高度"
- *    （[WidgetData.photoBoxTargetDp]）。行数计算时已经把预留扣掉了（[WidgetData.rowsFor]），
- *    所以不够一整行的那些零头全部落在图片上 —— 向下拉组件时图片跟着长高，
- *    而不是多挤出一行课；向右拉组件时宽度变宽，理想高度也跟着变高（16:9 由宽度决定）。
- * 3. **解码尺寸就是这个框的像素尺寸**（[PhotoBitmap.targetPx]）+ 居中裁剪
- *    （[PhotoBitmap.decode]）：框和位图永远同一个宽高比，既不会拉伸，也不会露缝。
- *    以前框高是按组件高度在 0.72 / 1.15 之间跳的，框一变比例，`centerCrop` 就裁在别处 ——
- *    用户看到的正是"显示窗口和图片大小对不上"。
- * 4. **这一次：图片有了"显示方式"**（用户："会出现图片显示不全的情况，而且应该加上选择图片时
- *    选择显示的样式即截取多少"）。上面第 3 条那个"永远居中裁剪"的解法保证了比例一致，
- *    但它的代价是**照片必然被切、而且裁哪一段用户说了不算** —— 于是：
- *      · 「完整显示」= 整张缩进框、不裁剪（留边，见 [PhotoFit.containLayout]）；
- *      · 「裁剪位置」= 在「填满」下挑顶部/中间/底部那一段（见 [PhotoFit.window]）；
- *      · 「放大倍数」= 想比"刚好铺满"再多看一点主体时用（[ZOOM_OPTIONS]）。
- *    默认值 = 填满 + 居中 + 1.0 倍 = **与第 3 条逐字节相同**，老用户看到的图一个字都不变。
+ *    （[WidgetData.photoBoxTargetDp]）：向下/向右拉组件，多出来的零头全部落在图片上。
+ * 3. **位图不再交给宿主缩放或裁剪**：解码尺寸就是框的像素尺寸（[PhotoBitmap.targetPx]）。
+ * 4. 上一轮加过"显示方式 / 裁哪一段 / 放大倍数"三个用户开关。用户否掉了：
+ *    「我不是要你有显示倍率，而是导入图片的时候可以自己裁剪」。于是这一轮改成：
+ *    **用户在图库导入时自己裁一次**（`ui/PhotoCropDialog.kt`），**程序只按空间决定怎么放**
+ *    （[PhotoFit.layout]：放得下 → 整张完整显示；放不下 → 在这张裁剪图里居中取一块）。
+ *    三个偏好键从此不再被读取（说明写在 `widget/PhotoDisplayMode.kt` 里：
+ *    那个文件现在只剩三个常量的空壳，只为一处编译保留，没有任何读写路径）。
  *
  * ## 日志是有意留的
  *
  * 这一段出问题在真机上极难定位（只有一张图 / 一张坏图 / 宿主不支持某个 RemoteViews 方法），
- * 所以每次刷新都打一行：显示了几张、余量多少、框多大多少比例、bitmap 多少像素多少字节、
- * set 成功没有。"我在真机上看不到画面"的时候，这一行就是唯一判据。
+ * 所以每次刷新都打一行：显示了几张、余量多少、**框多大多少比例、裁剪框多少比例、
+ * 走的是哪条分支（完整显示 / 取中间块）、位图多少像素多少字节、什么格式、set 成功没有**。
+ * "我在真机上看不到画面"的时候，这一行就是唯一判据。
  */
 internal object WidgetExtras {
 
@@ -91,15 +85,13 @@ internal object WidgetExtras {
 
         // ---- 图片 ----
         if (plan.photoVisible) {
-            // 显示规格**每次构建 RemoteViews 都现读一次**（见 PhotoDisplayPrefs.read）：
-            // 用户在设置页改完「显示方式 / 裁剪位置 / 放大倍数」并 refreshAll 之后，
-            // 这里拿到的就是新值 —— 不加缓存是刻意的，"改了没反应"十有八九是缓存造成的。
-            val spec = PhotoDisplayPrefs.read(context)
             // 解码目标 = 框的内容宽 × 这次分到的高度（都换算成像素）。
-            // 两个模式下它都只是**上限**：「填满」正好等于框，「完整显示」只会更小（留边的部分不传像素）。
+            // 它是"位图绝不超过这个尺寸"的上限：完整显示那条路只会更小（留边的部分不传像素）。
             val target = PhotoBitmap.targetPx(contentDp, plan.photoHeightDp, density)
+            // 裁剪框只用于日志：它回答"用户当初裁剪时的框，和此刻组件里的框差多少"
+            val frame = WidgetData.photoFrame(context)
             val index = PhotoCursor.current(context, photos.size)
-            val shown = decodeFrom(context, photos, index, target, spec)
+            val shown = decodeFrom(context, photos, index, target)
 
             if (shown == null) {
                 // 一张都解不出来（文件损坏 / 根本不是图片）：退回"不显示图片"，句子照旧 ——
@@ -107,11 +99,11 @@ internal object WidgetExtras {
                 views.setViewVisibility(R.id.widget_photo_area, View.GONE)
                 Log.w(
                     TAG,
-                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 样式=$spec bitmap=全部解码失败 " +
-                        "set=no（图片区已隐藏）"
+                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 裁剪框=${frame.label} " +
+                        "全部解码失败 set=no（图片区已隐藏）"
                 )
             } else {
-                val (at, bitmap) = shown
+                val (at, render) = shown
                 // 把"真正显示出来的那一张"写回下标：跳过了坏图，下一次点击才是真的下一张
                 PhotoCursor.remember(context, at)
 
@@ -134,30 +126,14 @@ internal object WidgetExtras {
                     views.setOnClickPendingIntent(R.id.widget_photo_area, nextPhoto)
                 }
 
-                // scaleType 随模式走：布局里写死的是 centerCrop（老行为），
-                // 「完整显示」必须换成 FIT_CENTER —— 否则宿主会把"已经塞得进框"的位图再裁掉一两个像素，
-                // 而"一个像素都不裁"正是那个模式的全部意义。
-                // 用 setInt("setScaleType", 序号) 而不是反射：RemoteViews 只认这一种表达方式。
-                runCatching {
-                    views.setInt(
-                        R.id.widget_photo_image,
-                        "setScaleType",
-                        spec.mode.scaleTypeOrdinal
-                    )
-                }
-
                 val set = runCatching {
-                    views.setImageViewBitmap(R.id.widget_photo_image, bitmap)
+                    views.setImageViewBitmap(R.id.widget_photo_image, render.bitmap)
                 }
                 Log.i(
                     TAG,
-                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 样式=$spec " +
-                        "scaleType=${spec.mode.scaleTypeOrdinal} " +
-                        "框=${contentDp}x${plan.photoHeightDp}dp(${PhotoBitmap.ratioLabel(contentDp, plan.photoHeightDp)}) " +
-                        "窗口=${PhotoBitmap.windowLabel(bitmap, spec, target)} " +
-                        "bitmap=${bitmap.width}x${bitmap.height}/" +
-                        "${PhotoBitmap.sizeLabel(PhotoBitmap.byteCount(bitmap))} " +
-                        "set=${if (set.isSuccess) "ok" else "FAIL:${set.exceptionOrNull()?.javaClass?.simpleName}"}"
+                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 " +
+                        PhotoBitmap.renderLabel(render, frame, contentDp, plan.photoHeightDp) +
+                        " set=${if (set.isSuccess) "ok" else "FAIL:${set.exceptionOrNull()?.javaClass?.simpleName}"}"
                 )
             }
         } else {
@@ -182,28 +158,28 @@ internal object WidgetExtras {
     /**
      * 从第 [start] 张开始按"当前这张 → 其余各张"的顺序，找第一张能解码的图。
      *
-     * 返回显示出来的下标与位图。**一定要返回下标**：调用方要靠它把坏图跳过这件事写回状态，
+     * 返回显示出来的下标与渲染结果。**一定要返回下标**：调用方要靠它把坏图跳过这件事写回状态，
      * 否则用户每点一次都会先撞一次坏图，像"按两下才换一张"。
      *
      * "第一张坏了就整块空白"是最糟的失败模式：用户明明开了图片却什么都看不到，
      * 而实际上只有一张图有问题。
      *
-     * [spec] 是这一次的显示规格（显示方式 / 裁剪位置 / 放大倍数）；调用方必须把**同一个** spec
-     * 同时用在位图解码和 ImageView 的 scaleType 上，否则会出现"图是留边做的、控件却按裁剪画"。
+     * 这里**没有**"显示方式"参数了：裁哪一块由用户在导入时决定（图片文件本身就是裁好的），
+     * 怎么放由 [PhotoFit.layout] 按当前框决定 —— 同一个框、同一张图必然得到同一个结果，
+     * 所以「整块重画」与「只换图片的局部刷新」不可能再对不上。
      */
     fun decodeFrom(
         context: Context,
         photos: List<String>,
         start: Int,
-        target: IntArray,
-        spec: PhotoFitSpec = PhotoFitSpec.LEGACY
-    ): Pair<Int, Bitmap>? {
+        target: IntArray
+    ): Pair<Int, PhotoRender>? {
         if (photos.isEmpty() || target[0] <= 0 || target[1] <= 0) return null
         val from = PhotoCursor.clamp(start, photos.size)
         for (step in photos.indices) {
             val index = (from + step) % photos.size
-            val bitmap = PhotoBitmap.decode(context, photos[index], target[0], target[1], spec)
-            if (bitmap != null) return index to bitmap
+            val render = PhotoBitmap.decode(context, photos[index], target[0], target[1])
+            if (render != null) return index to render
             Log.w(TAG, "跳过一张解不出来的图：${photos[index]}")
         }
         return null

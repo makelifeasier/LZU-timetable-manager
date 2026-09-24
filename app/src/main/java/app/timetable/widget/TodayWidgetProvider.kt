@@ -43,9 +43,7 @@ class TodayWidgetProvider : AppWidgetProvider() {
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray
     ) {
-        for (id in appWidgetIds) {
-            runCatching { appWidgetManager.updateAppWidget(id, build(context, id)) }
-        }
+        for (id in appWidgetIds) update(appWidgetManager, context, id)
         // 系统每 30 分钟唤醒一次；超过 15 分钟没同步才真的发网络请求
         val stale = System.currentTimeMillis() - TimetableRepository.status.at > 15 * 60 * 1000L
         if (stale) TimetableRepository.refresh(context.applicationContext)
@@ -58,11 +56,13 @@ class TodayWidgetProvider : AppWidgetProvider() {
         appWidgetId: Int,
         newOptions: Bundle
     ) {
-        runCatching { appWidgetManager.updateAppWidget(appWidgetId, build(context, appWidgetId)) }
+        update(appWidgetManager, context, appWidgetId)
         runCatching {
             appWidgetManager.notifyAppWidgetViewDataChanged(
                 intArrayOf(appWidgetId), R.id.widget_list
             )
+        }.onFailure {
+            Log.w(TAG, "列表重新取数失败 id=$appWidgetId -> ${it.javaClass.simpleName}: ${it.message}", it)
         }
     }
 
@@ -159,8 +159,11 @@ class TodayWidgetProvider : AppWidgetProvider() {
             val mgr = AppWidgetManager.getInstance(app) ?: return
             val ids = mgr.getAppWidgetIds(ComponentName(app, TodayWidgetProvider::class.java))
             if (ids.isEmpty()) return
-            for (id in ids) runCatching { mgr.updateAppWidget(id, build(app, id)) }
+            for (id in ids) update(mgr, app, id)
             runCatching { mgr.notifyAppWidgetViewDataChanged(ids, R.id.widget_list) }
+                .onFailure {
+                    Log.w(TAG, "列表重新取数失败 -> ${it.javaClass.simpleName}: ${it.message}", it)
+                }
         }
 
         /**
@@ -174,7 +177,33 @@ class TodayWidgetProvider : AppWidgetProvider() {
             val mgr = AppWidgetManager.getInstance(app) ?: return
             val ids = mgr.getAppWidgetIds(ComponentName(app, TodayWidgetProvider::class.java))
             if (ids.isEmpty()) return
-            for (id in ids) runCatching { mgr.updateAppWidget(id, build(app, id)) }
+            for (id in ids) update(mgr, app, id)
+        }
+
+        /**
+         * 更新一个小组件，**并把失败原因写进日志**。
+         *
+         * ## 为什么必须这么写（真机事故）
+         *
+         * 以前这里是 `runCatching { mgr.updateAppWidget(id, build(context, id)) }`：
+         * `build()` 或 `updateAppWidget()` 一旦抛异常，异常被 `runCatching` 静静吃掉 ——
+         * **`updateAppWidget` 根本不会执行**，界面停在旧内容，而日志里一个字母都没有。
+         * 用户反馈的"导入图片后小组件无法显示"就是这样查不出原因的：
+         * 位图太大过不了 binder、某个 RemoteViews 方法不被宿主支持、解码抛异常……
+         * 全都会在 `build()` 里冒出来，然后被这条 `runCatching` 吞掉。
+         *
+         * 这里的取舍是：**保留 `runCatching`（去掉它等于让异常变成崩溃），但把异常变成日志**。
+         * 崩溃比"组件不刷新"严重得多，而"静默不刷新"根本没法查 —— 两者都不是想要的，
+         * 所以保留容错 + 强制留痕。
+         */
+        private fun update(mgr: AppWidgetManager, context: Context, id: Int) {
+            val views = runCatching { build(context, id) }.getOrElse { t ->
+                Log.w(TAG, "widget 构建失败 id=$id -> ${t.javaClass.simpleName}: ${t.message}", t)
+                return
+            }
+            runCatching { mgr.updateAppWidget(id, views) }.onFailure { t ->
+                Log.w(TAG, "widget 更新失败 id=$id -> ${t.javaClass.simpleName}: ${t.message}", t)
+            }
         }
 
         fun build(context: Context, widgetId: Int): RemoteViews {

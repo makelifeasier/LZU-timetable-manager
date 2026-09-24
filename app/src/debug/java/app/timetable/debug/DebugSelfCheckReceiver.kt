@@ -67,7 +67,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_STYLECHECK -> styleCheck(context)
                 ACTION_FEATURECHECK -> featureCheck(context)
                 ACTION_SEED -> seedData(context)
-                ACTION_PHOTOSEED -> photoSeed(context, intent.getIntExtra("fit", -1))
+                ACTION_PHOTOSEED -> photoSeed(context, intent.getStringExtra("file"))
                 ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_CALCHECK -> calendarCheck(context)
                 ACTION_GREETCHECK -> greetCheck(context)
@@ -642,7 +642,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
      * 为什么要在 App 里生成而不是 `adb push`：图片必须是**我们自己的包目录**下的文件，
      * 才能复现"启动器跨进程读私有文件"这条路径；生成比 push + chmod 可靠得多。
      */
-    private fun photoSeed(context: Context, fit: Int = -1) {
+    private fun photoSeed(context: Context, realFile: String? = null) {
         try {
             Prefs.init(context)
             val dir = java.io.File(context.filesDir, "photos").apply { mkdirs() }
@@ -672,23 +672,22 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             }
 
             // photoUris 存的是**绝对路径**，每行一个（见 WidgetPhotos）
-            Prefs.photoUris = made.joinToString("\n")
+            // realFile：用一张真实尺寸的照片来复现（生成的小图测不出"大图/竖图"这类问题）
+            val real = realFile?.let { java.io.File(context.filesDir, it) }
+            Prefs.photoUris = if (real != null && real.isFile) {
+                Log.i(TAG, "PHOTOSEED 用真实照片 ${real.absolutePath} (${real.length()} 字节)")
+                real.absolutePath
+            } else {
+                made.joinToString("\n")
+            }
             Prefs.photoEnabled = true
             Prefs.quoteEnabled = true
             // 「强制显示」= 跳过余量判断。自检的小组件往往被系统压在很小的尺寸上，
             // 自动档会因为"真的放不下"而合理隐藏，那样就测不到渲染链路了。
             Prefs.widgetExtrasOverride = 1
-            // 显示方式：-1 = 不动（用当前设置）；0 = 填满裁剪；1 = 完整显示。
-            // 两种模式的差异（左边留不留边）只能靠真机截图取像素验证。
-            // 键名/文件名都取自 PhotoDisplayPrefs —— 与小组件读的是同一份，只有一处定义
-            if (fit in 0..1) {
-                context.getSharedPreferences(
-                    app.timetable.widget.PhotoDisplayPrefs.FILE,
-                    Context.MODE_PRIVATE
-                ).edit()
-                    .putInt(app.timetable.widget.PhotoDisplayPrefs.KEY_FIT_MODE, fit)
-                    .apply()
-            }
+            // 说明：以前这里能指定"显示方式/倍率"，那些开关已经彻底删掉了 ——
+            // 现在由渲染端自动决定（空间够就完整显示，不够就取裁剪图的中间一块），
+            // 用户要裁的话是在导入时用 PhotoCropDialog 自己裁。
             TodayWidgetProvider.refreshAll(context)
             Log.i(
                 TAG,
