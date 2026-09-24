@@ -370,4 +370,9 @@ object Prefs {
     var animEnabled: Boolean
         get() = b("animEnabled", true)
         set(v) = sp.edit().putBoolean("animEnabled", v).apply()
+
+    // 说明：小组件图片的「显示方式 / 裁哪一段 / 放大多少」三个开关**刻意不在这里**。
+    // 它们的键名与常量由 `widget/PhotoDisplayMode.kt` 的 PhotoDisplayPrefs 持有，
+    // 设置页直接按那份常量读写同一份 SharedPreferences —— 键名只有一处定义，
+    // 不可能出现"设置页写 A、小组件读 B"这种最难查的错位（有单测守着）。
 }

@@ -103,6 +103,68 @@ class DayOverridesTest {
         assertEquals(setOf(today.minusDays(2), today, today.plusDays(30)), kept.keys)
     }
 
+    // ------------------------------------------------------- 换到"别的星期几"（用户实测指出）
+
+    /**
+     * 「换一整天的课」是换到**其它天**，不是周四都换到周四。
+     *
+     * 真实场景：这周四上的是周三的课（调课/补课就是这么来的）。
+     * 最早的实现只按"同一个星期几换到别的周"取，这个需求根本做不到 —— 用户当场指出。
+     * 这条测试把它钉死。
+     */
+    @Test
+    fun replaceCanTakeAnotherWeekday() {
+        val result = ParseResult(
+            sections = listOf(Section(1, "第1节", "08:30", "09:15")),
+            sessions = listOf(
+                Session(name = "周三的课", day = 3, startSection = 1, endSection = 1),
+                Session(name = "周四原本的课", day = 4, startSection = 1, endSection = 1)
+            )
+        )
+        // 把周四（day=4）换成第 2 周的周三（day=3）
+        val got = DayOverrides.replaceSource(
+            result,
+            DayOverrides.Override(DayOverrides.Mode.REPLACE, sourceWeek = 2, sourceDay = 3),
+            targetDay = 4
+        )
+        assertEquals(1, got.size)
+        assertEquals("周三的课", got.first().name)
+        // day 必须改写成"被替换的那一天"，否则会画到周三那一列去
+        assertEquals(4, got.first().day)
+    }
+
+    @Test
+    fun replaceDefaultsToSameWeekdayForOldData() {
+        val result = ParseResult(
+            sections = listOf(Section(1, "第1节", "08:30", "09:15")),
+            sessions = listOf(
+                Session(name = "周四的课", day = 4, startSection = 1, endSection = 1),
+                Session(name = "周三的课", day = 3, startSection = 1, endSection = 1)
+            )
+        )
+        // sourceDay = 0 是"旧数据"的形态（当时只存了 week），语义必须还是"同一个星期几"
+        val got = DayOverrides.replaceSource(
+            result,
+            DayOverrides.Override(DayOverrides.Mode.REPLACE, sourceWeek = 2),
+            targetDay = 4
+        )
+        assertEquals("周四的课", got.single().name)
+    }
+
+    @Test
+    fun replaceWithInvalidWeekReturnsEmptyInsteadOfCrashing() {
+        val result = ParseResult(
+            sections = listOf(Section(1, "第1节", "08:30", "09:15")),
+            sessions = listOf(Session(name = "课", day = 4, startSection = 1, endSection = 1))
+        )
+        val got = DayOverrides.replaceSource(
+            result,
+            DayOverrides.Override(DayOverrides.Mode.REPLACE, sourceWeek = 0),
+            targetDay = 4
+        )
+        assertTrue("周次非法时返回空表（调用方会退回 base）", got.isEmpty())
+    }
+
     // ------------------------------------------------------- 与小组件的衔接
 
     /**

@@ -9,6 +9,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -47,6 +48,17 @@ internal class DayEditDialog(
     private lateinit var pageLabel: TextView
     private lateinit var statusLine: TextView
 
+    /**
+     * 「从哪天」：源星期几（1..7）。默认 = 被点的这一天。
+     *
+     * 用户可以改成**任意星期几** —— 调课的真实形态是"这周四上周三的课"，
+     * 而不是"周四换到另一个周四"（后者是我最初的错误实现，用户当场指出来了）。
+     */
+    private var sourceDay: Int = day
+
+    /** 源星期几 chips，重建页面时要重画选中态 */
+    private var dayChips: LinearLayout? = null
+
     private val maxWeek: Int
         get() {
             val r = TimetableRepository.result()
@@ -76,6 +88,45 @@ internal class DayEditDialog(
             setPadding(0, dp(4), 0, dp(2))
         }
         root.addView(statusLine)
+
+        // 「从哪天」：源星期几可以随便挑 —— 调课最常见的就是"这周四上周三的课"。
+        // 一开始我只让"同一星期几换到别的周"，用户直接指出这是没有常识的做法（他是对的）。
+        root.addView(
+            TextView(ctx).apply {
+                text = "把这天的课换成（从哪天）："
+                textSize = 12f
+                setTextColor(ctx.getColor(R.color.text_secondary))
+                setPadding(0, dp(6), 0, 0)
+            }
+        )
+        root.addView(
+            HorizontalScrollView(ctx).apply {
+                isHorizontalScrollBarEnabled = false
+                dayChips = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    for (d in 1..7) {
+                        addView(
+                            TextView(ctx).apply {
+                                text = Session.dayLabel(d)
+                                textSize = 12f
+                                gravity = Gravity.CENTER
+                                setPadding(dp(11), dp(7), dp(11), dp(7))
+                                layoutParams = LinearLayout.LayoutParams(WRAP, WRAP).apply {
+                                    marginEnd = dp(5); topMargin = dp(4)
+                                }
+                                isClickable = true
+                                setOnClickListener {
+                                    if (sourceDay == d) return@setOnClickListener
+                                    sourceDay = d
+                                    rebuildPages()   // 预览内容跟着源星期几变
+                                }
+                            }
+                        )
+                    }
+                }
+                addView(dayChips)
+            }
+        )
 
         // 左右滑动切周
         flipper = ViewFlipper(ctx).apply {
@@ -171,13 +222,26 @@ internal class DayEditDialog(
 
     private fun refreshLabels() {
         val week = page + 1
-        // 把单双周明写出来：用户原话是"调一天的是可以选单双周中的任意一天"，
-        // 而单双周的课本来就是按周奇偶显示的 —— 不标出来的话，左右翻周时
-        // 看到"第 3 周有课、第 4 周没课"会莫名其妙（其实那门课就是单周课）。
+        // 单双周明写出来：用户要在"单双周里的任意一天"里挑，不标出来会莫名其妙
+        // （第 3 周有课、第 4 周没课，其实那门课就是单周课）
         val parity = if (week % 2 == 1) "单周" else "双周"
-        val count = WeekCalc.merge(WeekCalc.sessionsFor(TimetableRepository.result(), day, week)).size
-        pageLabel.text = "第 $week 周（$parity） · ${Session.dayLabel(day)} · " +
+        val count = WeekCalc.merge(
+            WeekCalc.sessionsFor(TimetableRepository.result(), sourceDay, week)
+        ).size
+        pageLabel.text = "第 $week 周（$parity） · ${Session.dayLabel(sourceDay)} · " +
             if (count == 0) "没课" else "$count 节"
+        // 源星期几 chips 的选中态
+        dayChips?.let { row ->
+            for (i in 0 until row.childCount) {
+                val chip = row.getChildAt(i) as? TextView ?: continue
+                val d = i + 1
+                val on = d == sourceDay
+                chip.background = ctx.getDrawable(
+                    if (on) R.drawable.bg_accent_chip else R.drawable.bg_pill
+                )
+                chip.setTextColor(ctx.getColor(if (on) R.color.accent else R.color.text_secondary))
+            }
+        }
         val o = DayOverrides.get(ctx, date)
         statusLine.text = when {
             o == null -> "这一天还没调整过"
@@ -190,17 +254,19 @@ internal class DayEditDialog(
                 "已调整：这一天有 ${o.extra.size} 节课是单独改过的"
             }
 
-            o.mode == DayOverrides.Mode.REPLACE -> "已调整：替换为第 ${o.sourceWeek} 周这天"
+            o.mode == DayOverrides.Mode.REPLACE -> "已调整：换成第 ${o.sourceWeek} 周的" +
+                Session.dayLabel(if (o.sourceDay in 1..7) o.sourceDay else day)
+
             o.mode == DayOverrides.Mode.CLEAR -> "已调整：当天课全部取消"
             o.mode == DayOverrides.Mode.ADD -> "已调整：额外加了 ${o.extra.size} 节课"
             else -> "已调整"
         }
     }
 
-    /** 一周一页：该周的这天有哪些课 */
+    /** 一周一页：**候选源星期几**在该周的课（用户翻到哪一周就预览哪一周） */
     private fun pageView(week: Int): View {
         val list = TimetableRepository.result()
-        val sessions = WeekCalc.merge(WeekCalc.sessionsFor(list, day, week))
+        val sessions = WeekCalc.merge(WeekCalc.sessionsFor(list, sourceDay, week))
         val box = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(2), dp(8), dp(2), dp(4))
@@ -210,14 +276,14 @@ internal class DayEditDialog(
             box.gravity = Gravity.CENTER
             box.addView(
                 TextView(ctx).apply {
-                    text = "这周${Session.dayLabel(day)}没课"
+                    text = "第 $week 周的${Session.dayLabel(sourceDay)}没课"
                     textSize = 14f
                     setTextColor(ctx.getColor(R.color.text_secondary))
                 }
             )
             box.addView(
                 TextView(ctx).apply {
-                    text = "（可以选择别的周替换过来，或直接清空当天）"
+                    text = "（换一个「从哪天」或另一周试试，也可以直接清空当天）"
                     textSize = 11f
                     setTextColor(ctx.getColor(R.color.text_tertiary))
                     setPadding(0, dp(6), 0, 0)
@@ -268,7 +334,7 @@ internal class DayEditDialog(
             LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 setPadding(0, dp(6), 0, 0)
-                addView(pill("替换为这周") { replace() })
+                addView(pill("换成这一天") { replace() })
                 addView(pill("加一节课") { addOne() })
                 addView(pill("清空当天") { clearDay() })
                 addView(pill("恢复原课表") { restore() })
@@ -278,12 +344,24 @@ internal class DayEditDialog(
 
     private fun replace() {
         val week = page + 1
-        if (week == currentWeek()) {
-            toast("这一页就是当天本身，换个周再点替换")
+        // 只有"同一周的同一天"才是空操作 —— 换到别的星期几哪怕同一周也是合法的
+        // （周四上周三的课，本来就是最常见的那种调课）
+        if (week == currentWeek() && sourceDay == day) {
+            toast("这就是当天本身；换一个「从哪天」或换一周再点")
             return
         }
-        DayOverrides.put(ctx, date, DayOverrides.Override(DayOverrides.Mode.REPLACE, sourceWeek = week))
-        applyAndClose("已把${Session.dayLabel(day)}替换为第 $week 周")
+        DayOverrides.put(
+            ctx, date,
+            DayOverrides.Override(
+                DayOverrides.Mode.REPLACE,
+                sourceWeek = week,
+                // 同一天时不写（0），老版本读回来语义不变
+                sourceDay = if (sourceDay == day) 0 else sourceDay
+            )
+        )
+        applyAndClose(
+            "已把${Session.dayLabel(day)}换成第 $week 周的${Session.dayLabel(sourceDay)}"
+        )
     }
 
     private fun clearDay() {

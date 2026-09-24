@@ -30,6 +30,13 @@ import java.io.File
  *    （[PhotoBitmap.decode]）：框和位图永远同一个宽高比，既不会拉伸，也不会露缝。
  *    以前框高是按组件高度在 0.72 / 1.15 之间跳的，框一变比例，`centerCrop` 就裁在别处 ——
  *    用户看到的正是"显示窗口和图片大小对不上"。
+ * 4. **这一次：图片有了"显示方式"**（用户："会出现图片显示不全的情况，而且应该加上选择图片时
+ *    选择显示的样式即截取多少"）。上面第 3 条那个"永远居中裁剪"的解法保证了比例一致，
+ *    但它的代价是**照片必然被切、而且裁哪一段用户说了不算** —— 于是：
+ *      · 「完整显示」= 整张缩进框、不裁剪（留边，见 [PhotoFit.containLayout]）；
+ *      · 「裁剪位置」= 在「填满」下挑顶部/中间/底部那一段（见 [PhotoFit.window]）；
+ *      · 「放大倍数」= 想比"刚好铺满"再多看一点主体时用（[ZOOM_OPTIONS]）。
+ *    默认值 = 填满 + 居中 + 1.0 倍 = **与第 3 条逐字节相同**，老用户看到的图一个字都不变。
  *
  * ## 日志是有意留的
  *
@@ -84,11 +91,15 @@ internal object WidgetExtras {
 
         // ---- 图片 ----
         if (plan.photoVisible) {
-            // 解码目标 = 框的内容宽 × 这次分到的高度（都换算成像素）：
-            // 位图与框的宽高比**逐值相同**，宿主那边的 centerCrop 实际上裁不到东西
+            // 显示规格**每次构建 RemoteViews 都现读一次**（见 PhotoDisplayPrefs.read）：
+            // 用户在设置页改完「显示方式 / 裁剪位置 / 放大倍数」并 refreshAll 之后，
+            // 这里拿到的就是新值 —— 不加缓存是刻意的，"改了没反应"十有八九是缓存造成的。
+            val spec = PhotoDisplayPrefs.read(context)
+            // 解码目标 = 框的内容宽 × 这次分到的高度（都换算成像素）。
+            // 两个模式下它都只是**上限**：「填满」正好等于框，「完整显示」只会更小（留边的部分不传像素）。
             val target = PhotoBitmap.targetPx(contentDp, plan.photoHeightDp, density)
             val index = PhotoCursor.current(context, photos.size)
-            val shown = decodeFrom(context, photos, index, target)
+            val shown = decodeFrom(context, photos, index, target, spec)
 
             if (shown == null) {
                 // 一张都解不出来（文件损坏 / 根本不是图片）：退回"不显示图片"，句子照旧 ——
@@ -96,7 +107,8 @@ internal object WidgetExtras {
                 views.setViewVisibility(R.id.widget_photo_area, View.GONE)
                 Log.w(
                     TAG,
-                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 bitmap=全部解码失败 set=no（图片区已隐藏）"
+                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 样式=$spec bitmap=全部解码失败 " +
+                        "set=no（图片区已隐藏）"
                 )
             } else {
                 val (at, bitmap) = shown
@@ -122,13 +134,27 @@ internal object WidgetExtras {
                     views.setOnClickPendingIntent(R.id.widget_photo_area, nextPhoto)
                 }
 
+                // scaleType 随模式走：布局里写死的是 centerCrop（老行为），
+                // 「完整显示」必须换成 FIT_CENTER —— 否则宿主会把"已经塞得进框"的位图再裁掉一两个像素，
+                // 而"一个像素都不裁"正是那个模式的全部意义。
+                // 用 setInt("setScaleType", 序号) 而不是反射：RemoteViews 只认这一种表达方式。
+                runCatching {
+                    views.setInt(
+                        R.id.widget_photo_image,
+                        "setScaleType",
+                        spec.mode.scaleTypeOrdinal
+                    )
+                }
+
                 val set = runCatching {
                     views.setImageViewBitmap(R.id.widget_photo_image, bitmap)
                 }
                 Log.i(
                     TAG,
-                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 " +
+                    "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 样式=$spec " +
+                        "scaleType=${spec.mode.scaleTypeOrdinal} " +
                         "框=${contentDp}x${plan.photoHeightDp}dp(${PhotoBitmap.ratioLabel(contentDp, plan.photoHeightDp)}) " +
+                        "窗口=${PhotoBitmap.windowLabel(bitmap, spec, target)} " +
                         "bitmap=${bitmap.width}x${bitmap.height}/" +
                         "${PhotoBitmap.sizeLabel(PhotoBitmap.byteCount(bitmap))} " +
                         "set=${if (set.isSuccess) "ok" else "FAIL:${set.exceptionOrNull()?.javaClass?.simpleName}"}"
@@ -161,18 +187,22 @@ internal object WidgetExtras {
      *
      * "第一张坏了就整块空白"是最糟的失败模式：用户明明开了图片却什么都看不到，
      * 而实际上只有一张图有问题。
+     *
+     * [spec] 是这一次的显示规格（显示方式 / 裁剪位置 / 放大倍数）；调用方必须把**同一个** spec
+     * 同时用在位图解码和 ImageView 的 scaleType 上，否则会出现"图是留边做的、控件却按裁剪画"。
      */
     fun decodeFrom(
         context: Context,
         photos: List<String>,
         start: Int,
-        target: IntArray
+        target: IntArray,
+        spec: PhotoFitSpec = PhotoFitSpec.LEGACY
     ): Pair<Int, Bitmap>? {
         if (photos.isEmpty() || target[0] <= 0 || target[1] <= 0) return null
         val from = PhotoCursor.clamp(start, photos.size)
         for (step in photos.indices) {
             val index = (from + step) % photos.size
-            val bitmap = PhotoBitmap.decode(context, photos[index], target[0], target[1])
+            val bitmap = PhotoBitmap.decode(context, photos[index], target[0], target[1], spec)
             if (bitmap != null) return index to bitmap
             Log.w(TAG, "跳过一张解不出来的图：${photos[index]}")
         }

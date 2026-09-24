@@ -32,6 +32,7 @@ import app.timetable.ui.StylePreviewView
 import app.timetable.ui.TimetableRenderer
 import app.timetable.ui.Ui
 import app.timetable.ui.YearCalendarView
+import app.timetable.widget.PhotoDisplayPrefs
 import app.timetable.widget.TodayWidgetProvider
 import app.timetable.widget.WidgetData
 import app.timetable.widget.WidgetPhotos
@@ -55,6 +56,42 @@ class SettingsActivity : BaseActivity() {
     /** 余量判断三个选项与它们的取值（顺序和取值故意不一致：自动在中间才是符合直觉的排法） */
     private val OVERRIDE_LABELS = listOf("自动", "强制显示", "强制隐藏")
     private val OVERRIDE_VALUES = listOf(0, 1, -1)
+
+    /**
+     * 图片显示方式的选项。
+     *
+     * 顺序必须与 `widget/PhotoDisplayMode.kt` 里的取值一一对应（0=填满 / 1=完整），
+     * 放大倍数同理（下标 → 1.0/1.25/1.5/2/3 倍）。改这里之前先对一眼那边的常量 ——
+     * 两边错位一格就会"选填满结果完整显示"。
+     */
+    private val PHOTO_FIT_MODES = listOf("填满（裁剪）", "完整显示")
+    private val PHOTO_CROP_POSITIONS = listOf("顶部", "居中", "底部")
+    private val PHOTO_ZOOM_LABELS = listOf("1.0×", "1.25×", "1.5×", "2×", "3×")
+
+    /**
+     * 图片显示方式这几个开关**不走 Prefs 的封装**：键名与默认值都由
+     * `widget/PhotoDisplayMode.kt` 的 PhotoDisplayPrefs 持有，这里直接按它的常量
+     * 读写**同一份** SharedPreferences。
+     *
+     * 为什么这么绕：小组件那边是从这份文件直读的，键名只留一处定义才不可能错位
+     * （PhotoFitTest 里有一条测试专门守着"这三个键不许在 Prefs.kt 里再定义一遍"）。
+     */
+    private fun photoMode(): Int = photoPref(PhotoDisplayPrefs.KEY_FIT_MODE, 0)
+
+    private fun photoCropPosition(): Int = photoPref(PhotoDisplayPrefs.KEY_CROP_POSITION, 1)
+
+    private fun photoZoom(): Int = photoPref(PhotoDisplayPrefs.KEY_ZOOM, 0)
+
+    private fun photoPref(key: String, def: Int): Int = getSharedPreferences(
+        PhotoDisplayPrefs.FILE,
+        MODE_PRIVATE
+    ).getInt(key, def)
+
+    private fun setPhotoPref(key: String, value: Int, def: Int) {
+        getSharedPreferences(PhotoDisplayPrefs.FILE, MODE_PRIVATE).edit()
+            .putInt(key, if (value >= 0) value else def)
+            .apply()
+    }
 
     /** 课表风格预览的引用：改「周末底色」时也要重画它（它读的是 Prefs，但不会自己 invalidate） */
     private var stylePreview: StylePreviewView? = null
@@ -634,6 +671,50 @@ class SettingsActivity : BaseActivity() {
                                 .takeIf { it >= 0 } ?: 0
                         ) { index ->
                             Prefs.photoFlipSeconds = Prefs.photoFlipChoices[index]
+                            TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                            build()
+                        }
+                    )
+                }
+            }
+
+            // ---- 图片显示方式（用户实测反馈："图片显示不全，要能选显示的样式即截取多少"）----
+            // 没有图片时没什么可调的，所以只在"开了图片且真的有图"时出现
+            val photoCount = WidgetData.photoList(this@SettingsActivity)
+                .count { java.io.File(it).exists() }
+            if (Prefs.photoEnabled && photoCount > 0) {
+                row(
+                    "显示方式",
+                    if (photoMode() == 0) {
+                        "填满：铺满整条框，超出的部分会被裁掉 —— 适合当背景图"
+                    } else {
+                        "完整显示：整张都看得见，多出来的地方留边（框越扁留边越多）"
+                    }
+                )
+                addView(
+                    chipGrid(PHOTO_FIT_MODES, photoMode()) { index ->
+                        setPhotoPref(PhotoDisplayPrefs.KEY_FIT_MODE, index, 0)
+                        TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                        build()
+                    }
+                )
+                // 裁哪一段 / 放大多少只在"填满"时才有意义（完整显示模式本来就不裁）
+                if (photoMode() == 0) {
+                    row("裁哪一段", "竖照片尤其明显：一张 3:4 的照片进这条框，只有一小段能留下")
+                    addView(
+                        chipGrid(PHOTO_CROP_POSITIONS, photoCropPosition()) { index ->
+                            setPhotoPref(PhotoDisplayPrefs.KEY_CROP_POSITION, index, 1)
+                            TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                            build()
+                        }
+                    )
+                    row("放大（截取多少）", "越大留下的画面越少、细节越大")
+                    addView(
+                        chipGrid(
+                            PHOTO_ZOOM_LABELS,
+                            photoZoom().coerceIn(0, PHOTO_ZOOM_LABELS.lastIndex)
+                        ) { index ->
+                            setPhotoPref(PhotoDisplayPrefs.KEY_ZOOM, index, 0)
                             TodayWidgetProvider.refreshAll(this@SettingsActivity)
                             build()
                         }

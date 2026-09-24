@@ -103,6 +103,47 @@ internal object PhotoBitmap {
     }
 
     /**
+     * 纯函数（可单测）：日志里那一列"这次到底裁了多少 / 留了多少"。
+     *
+     * 为什么值得单独写一个：用户**看不到画面**，最终是拿真机截图去数像素的。
+     * 所以日志必须能和截图对上号，而"裁了多少"是唯一能对上的量：
+     *
+     *  - 「填满」：报裁剪窗口在源图上的相对位置与占源图的面积比
+     *    —— 例 `窗=1600x470 占源=25% pos=middle`，截图里该看到的就是源图**中间那条 25%**；
+     *  - 「完整显示」：报位图占框的面积比 —— 例 `占框=27%`，截图里就该有约 73% 是留边底色。
+     *
+     * 这些都是**估算时的原始数字**，不是"应该没问题"的自我安慰。
+     *
+     * @param target 这一次解码用的目标像素（[targetPx] 的结果）
+     */
+    fun windowLabel(bitmap: Bitmap, spec: PhotoFitSpec, target: IntArray): String {
+        if (target.size < 2 || target[0] <= 0 || target[1] <= 0) return "?"
+        val fit = PhotoFit.window(
+            srcW = bitmap.width,
+            srcH = bitmap.height,
+            targetW = target[0],
+            targetH = target[1],
+            mode = spec.mode,
+            position = spec.position,
+            zoom = spec.zoom
+        ) ?: return "窗=?"
+        val pos = when (spec.position) {
+            CropPosition.TOP -> "top"
+            CropPosition.MIDDLE -> "middle"
+            CropPosition.BOTTOM -> "bottom"
+        }
+        return if (spec.mode == PhotoFitMode.CONTAIN) {
+            val share = bitmap.width.toLong() * bitmap.height * 100 /
+                (target[0].toLong() * target[1]).coerceAtLeast(1)
+            "窗=${fit.width}x${fit.height}@(${fit.x},${fit.y}) 留边占框=${100 - share}%"
+        } else {
+            val share = fit.width.toLong() * fit.height * 100 /
+                (bitmap.width.toLong() * bitmap.height).coerceAtLeast(1)
+            "窗=${fit.width}x${fit.height}@(${fit.x},${fit.y}) 占源=${share}% pos=$pos"
+        }
+    }
+
+    /**
      * 解码一张图到"显示所需的最小尺寸"。
      *
      * 返回 null 表示这张图用不了（文件被删、损坏、不是图片……）—— 调用方应当**跳过它、
@@ -113,8 +154,29 @@ internal object PhotoBitmap {
      * 单张是几毫秒级（相册原图 1600px 先按 2 的幂降到接近目标，再裁再缩）。
      * 这是删轮播的必然结果：那套是在集合视图的 binder 线程上按项解码的，代价是它顺手把
      * 竖直手势也吃掉了（"开了轮播小组件就没法用"）。宁可主线程多花几毫秒，也不要一个滑不动的小组件。
+     *
+     * ## 这一轮加进来的"显示方式"
+     *
+     * [spec] 决定裁哪一块、缩到多大（算术全在 [PhotoFit]，那边是纯函数、可单测）：
+     *
+     *  - `填满 + 居中 + 1.0x`（默认）→ 与改动前**逐字节相同**的中心裁剪；
+     *  - `完整显示` → 整张照片等比缩到框里，位图尺寸 ≤ 框（宿主的 `FIT_CENTER` 只做居中，不再裁）；
+     *  - 放大倍数 → 裁的窗口更小、再缩到同一个框，靠**信息量**放大而不是靠插值放大。
+     *
+     * 解码尺寸仍然守着 binder 预算（[MAX_BITMAP_BYTES]）：两个模式的产出都不会超过
+     * [targetPx] 给出的目标像素数 —— 「完整显示」只会更小（框里塞得下多少做多少）。
+     *
+     * @param targetW 框的像素宽（[targetPx] 的结果，已经过 binder 预算夹取）
+     * @param targetH 框的像素高
+     * @param spec   这一次的显示规格（读一次的值为准，见 [PhotoDisplayPrefs.read]）
      */
-    fun decode(context: Context, path: String, targetW: Int, targetH: Int): Bitmap? = runCatching {
+    fun decode(
+        context: Context,
+        path: String,
+        targetW: Int,
+        targetH: Int,
+        spec: PhotoFitSpec = PhotoFitSpec.LEGACY
+    ): Bitmap? = runCatching {
         val file = File(path)
         if (!file.isFile || !file.canRead()) return@runCatching null
 
@@ -127,45 +189,76 @@ internal object PhotoBitmap {
             inPreferredConfig = Bitmap.Config.RGB_565
         }
         val decoded = BitmapFactory.decodeFile(path, opts) ?: return@runCatching null
-        scaleCenterCrop(decoded, targetW, targetH)
+
+        // 裁哪一块（两个模式共用同一套窗口算术，区别只在"取大 / 取小"，见 PhotoFit.window）
+        val window = PhotoFit.window(
+            srcW = decoded.width,
+            srcH = decoded.height,
+            targetW = targetW,
+            targetH = targetH,
+            mode = spec.mode,
+            position = spec.position,
+            zoom = spec.zoom
+        ) ?: return@runCatching null
+
+        val out = when (spec.mode) {
+            // 填满：窗口 ≈ 框的比例 → 产出就是框的尺寸（zoom 造成的取整误差由窗口比例兜住）
+            PhotoFitMode.FILL ->
+                PhotoFit.outSizeForFill(window.width, window.height, targetW, targetH)
+            // 完整显示：整张图（窗口 = 整张）等比缩到框里，产出可能明显小于框，差额就是留边
+            PhotoFitMode.CONTAIN ->
+                PhotoFit.fittedSize(decoded.width, decoded.height, targetW, targetH)
+        } ?: return@runCatching null
+
+        sliceAndScale(decoded, window, out[0], out[1])
     }.onFailure {
         Log.w(TAG, "解码失败 path=$path -> ${it.javaClass.simpleName}: ${it.message}")
     }.getOrNull()
 
     /**
-     * 按 `centerCrop` 语义缩到目标尺寸：**先取源图中间那块（与目标同比例），再缩到目标**。
+     * 按 [window] 从 [src] 上切一块，再缩到 [outW]×[outH]。
      *
-     * 为什么不用 `createScaledBitmap` 直接拉：那样会把图压扁变形。之所以能在这里裁，
-     * 是因为图片框的 `scaleType` 本来就是 `centerCrop` —— 我们现在裁掉的，正是宿主接下来
-     * 也会裁掉的那部分，所以观感完全一致，但传过去的像素少了一截。
+     * 这里有两个"以前会崩"的坑，都补上了（它们都在小组件刷新的主线程上）：
+     *
+     * 1. `Bitmap.createBitmap` 的 `width/height` 传 0 会抛 `IllegalArgumentException`
+     *    （源图尺寸小于目标框时，老代码的 `((src.width - cropW) / 2)` 能算出 0）；
+     * 2. 越界（`x + width > src.width`）同样抛异常。
+     *
+     * 现在的写法：裁剪矩形完全来自 [PhotoFit.window]（已保证 1..源尺寸 且不越界），
+     * 这里再夹一次，并且**切出来是空的时候直接不切**（宁可整张缩，也不要抛异常）。
+     * 抛异常的代价不是"这张图难看"，而是**整个小组件 provider 挂掉**——
+     * 桌面上的组件会一直停在旧内容，直到下一次刷新成功。
      */
-    private fun scaleCenterCrop(src: Bitmap, targetW: Int, targetH: Int): Bitmap {
-        if (src.width == targetW && src.height == targetH) return src
-        val srcRatio = src.width.toFloat() / src.height.toFloat()
-        val dstRatio = targetW.toFloat() / targetH.toFloat()
-        val cropW: Int
-        val cropH: Int
-        if (srcRatio > dstRatio) {
-            cropH = src.height
-            cropW = (src.height * dstRatio).toInt()
-        } else {
-            cropW = src.width
-            cropH = (src.width / dstRatio).toInt()
-        }
-        val cropped = if (cropW == src.width && cropH == src.height) {
+    private fun sliceAndScale(src: Bitmap, window: PhotoFit.Window, outW: Int, outH: Int): Bitmap {
+        val full = window.width >= src.width && window.height >= src.height
+        val cropped = if (full) {
             src
         } else {
             Bitmap.createBitmap(
                 src,
-                ((src.width - cropW) / 2).coerceAtLeast(0),
-                ((src.height - cropH) / 2).coerceAtLeast(0),
-                cropW.coerceIn(1, src.width),
-                cropH.coerceIn(1, src.height)
+                window.x.coerceIn(0, maxOf(src.width - 1, 0)),
+                window.y.coerceIn(0, maxOf(src.height - 1, 0)),
+                window.width.coerceIn(1, src.width),
+                window.height.coerceIn(1, src.height)
             )
         }
-        val out = Bitmap.createScaledBitmap(cropped, targetW, targetH, true)
+
+        // scaleTo 在"已经正好是这个尺寸"时直接返回原对象，不再多复制一份
+        val out = scaleTo(cropped, outW, outH)
         if (cropped !== src && out !== cropped) cropped.recycle()
         if (out !== src) src.recycle()
         return out
+    }
+
+    /**
+     * 缩放到目标尺寸。
+     *
+     * 为什么用 `createScaledBitmap` 而不是 `createBitmap(..., matrix)`：这是唯一一条
+     * 走 `filter=true`（双线性）的路径，缩放后的照片不会出现锯齿；其余两个模式里
+     * "尺寸没变也要复制一份"的情况这里已经提前返回原对象了。
+     */
+    private fun scaleTo(src: Bitmap, outW: Int, outH: Int): Bitmap {
+        if (outW <= 0 || outH <= 0 || (src.width == outW && src.height == outH)) return src
+        return Bitmap.createScaledBitmap(src, outW, outH, true)
     }
 }

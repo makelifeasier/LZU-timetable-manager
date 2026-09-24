@@ -36,8 +36,17 @@ internal object DayOverrides {
 
     data class Override(
         val mode: Mode,
-        /** 只在 REPLACE 时有意义：引用第几周的同一星期几 */
+        /** 只在 REPLACE 时有意义：引用第几周 */
         val sourceWeek: Int = 0,
+        /**
+         * 只在 REPLACE 时有意义：引用**星期几**（1=周一 … 7=周日）；0 = 与被替换的那天同一天。
+         *
+         * 用户实测后的原话："换一整天的课是换到其他天，不是周四都换到周四"。
+         * 原来这里只有 [sourceWeek]，于是"替换"被硬编码成**同一个星期几**——
+         * 而真实场景里最常见的恰恰是"这周四上的是周三的课"（调课/补课就是这么来的）。
+         * 0 表示"同一天"，是为了让老数据（只有 week 字段）读回来语义不变。
+         */
+        val sourceDay: Int = 0,
         /** ADD / LIST 时有意义：手动加的那几节；LIST 时是**整份**课表 */
         val extra: List<Session> = emptyList()
     ) {
@@ -57,6 +66,22 @@ internal object DayOverrides {
     }
 
     // ------------------------------------------------------------- 纯逻辑（可单测）
+
+    /**
+     * REPLACE 模式真正要取的那些课：**第 [Override.sourceWeek] 周的 [Override.sourceDay] 那一天**。
+     *
+     * 抽成纯函数是为了能单测 —— 这里曾经错过：最早只按"同一个星期几"去取，
+     * 于是"周四换成周三的课"这种最常见的调课根本做不到（用户当场指出）。
+     * 现在 [Override.sourceDay] 为 0 时表示"同一天"（老数据语义）。
+     *
+     * 取回来的课 `day` 会**改写成 [targetDay]**：否则画网格、排提醒时会按源星期几那一列去放。
+     */
+    fun replaceSource(result: ParseResult, o: Override, targetDay: Int): List<Session> {
+        if (o.sourceWeek < 1) return WeekCalc.sessionsFor(result, targetDay, 0) // 空表：周次非法
+        val srcDay = if (o.sourceDay in 1..7) o.sourceDay else targetDay
+        return WeekCalc.sessionsFor(result, srcDay, o.sourceWeek)
+            .map { it.copy(day = targetDay) }
+    }
 
     /**
      * 把覆盖应用到某一天的课表上。
@@ -93,8 +118,7 @@ internal object DayOverrides {
     fun listFor(o: Override, day: Int): List<Session> =
         WeekCalc.merge(o.extra.map { it.copy(day = day) })
 
-    /** ADD：把额外课并进原课表，按起始节排序、同节去重（同一节被加了两次只留一个） */
-    fun mergeSorted(base: List<Session>, extra: List<Session>, day: Int): List<Session> {
+    /** ADD：把额外课并进原课表，按起始节排序、同节去重（同一节被加了两次只留一个） */    fun mergeSorted(base: List<Session>, extra: List<Session>, day: Int): List<Session> {
         val normalized = extra.map { it.copy(day = day) }
         val seen = base.map { it.startSection to it.endSection to it.name }.toHashSet()
         val add = normalized.filter {
@@ -129,7 +153,7 @@ internal object DayOverrides {
                 // 兼容：整份列表最早是记成 CLEAR + "l": true 的，读到就归一化成 LIST。
                 // 不兼容的话，同一台设备上早先版本存下的"改过的那几节"会读成"当天课全没了"。
                 val normalized = if (item.optBoolean("l", false)) Mode.LIST else mode
-                out[date] = Override(normalized, item.optInt("w", 0), extra)
+                out[date] = Override(normalized, item.optInt("w", 0), item.optInt("sd", 0), extra)
             }
         }
         return out
@@ -156,7 +180,11 @@ internal object DayOverrides {
         for ((date, o) in map) {
             val item = JSONObject()
             item.put("m", o.mode.name)
-            if (o.mode == Mode.REPLACE) item.put("w", o.sourceWeek)
+            if (o.mode == Mode.REPLACE) {
+            item.put("w", o.sourceWeek)
+            // 只在"换到别的星期几"时才写：0（同一天）不写，老版本读到的还是原来的语义
+            if (o.sourceDay != 0) item.put("sd", o.sourceDay)
+        }
             // LIST 的 extra 就算是空的也不影响：此时只写 m=LIST，读回来就是"这一天没课"，
             // 与"没调过"（键不存在）分得清清楚楚。
             if ((o.mode == Mode.ADD || o.isList) && o.extra.isNotEmpty()) {

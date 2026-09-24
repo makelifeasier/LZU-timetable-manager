@@ -115,9 +115,15 @@ object TimetableRepository {
                 // 合并相邻节次那一步在 DayOverrides.listFor 里，和纯逻辑测试共用同一段代码。
                 o.isList -> DayOverrides.listFor(o, day)
 
-                // 替换：换成"另一周的同一星期几"
+                // 替换：换成"第 sourceWeek 周的 sourceDay（默认与这天同星期几）那一天的课"
                 o.mode == DayOverrides.Mode.REPLACE ->
-                    if (o.sourceWeek < 1) base else WeekCalc.sessionsFor(r, day, o.sourceWeek)
+                    if (o.sourceWeek < 1) {
+                        base
+                    } else {
+                        // 取值逻辑抽在 DayOverrides.replaceSource 里（纯函数、有单测）：
+                        // 这段曾经只按"同一个星期几"取，导致"周四换周三的课"做不到
+                        DayOverrides.replaceSource(r, o, day)
+                    }
 
                 o.mode == DayOverrides.Mode.CLEAR -> emptyList()
                 else -> DayOverrides.mergeSorted(base, o.extra, day)

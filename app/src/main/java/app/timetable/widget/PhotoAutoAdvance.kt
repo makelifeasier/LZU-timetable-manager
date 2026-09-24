@@ -129,6 +129,11 @@ internal object PhotoAutoAdvance {
      *
      * 解码目标与 [WidgetExtras.apply] 用的是**同一套算法同一个框**，所以自动换的那一张和
      * 点击换的那一张尺寸、比例完全一致，不会出现"自动换的图比手点的小一圈"。
+     *
+     * **显示方式也必须在这里现读一次**（[PhotoDisplayPrefs.read]）：这条路是「只更新一个 ImageView」
+     * 的局部刷新，不经过 [WidgetExtras.apply]，很容易忘记带上模式 ——
+     * 那样一来"自动换的下一张"就会退回默认的裁剪，而上一张是留边的，
+     * 用户看到的是图**跳一下**。所以模式和位图、scaleType 三样在这里也必须一起走。
      */
     fun repaintPhoto(context: Context, index: Int): Boolean {
         val app = context.applicationContext
@@ -138,12 +143,22 @@ internal object PhotoAutoAdvance {
 
         val contentDp = WidgetData.contentWidthDp(app)
         val photos = WidgetExtras.photos(app)
+        val spec = PhotoDisplayPrefs.read(app)
         val target = PhotoBitmap.targetPx(contentDp, boxDp, app.resources.displayMetrics.density)
-        val shown = WidgetExtras.decodeFrom(app, photos, index, target) ?: return false
+        val shown = WidgetExtras.decodeFrom(app, photos, index, target, spec) ?: return false
         val (at, bitmap) = shown
         PhotoCursor.remember(app, at)
 
         val partial = RemoteViews(app.packageName, R.layout.widget_today)
+        // scaleType 必须和位图一起走：局部刷新只重置这两样，漏掉它就会拿布局里的 centerCrop
+        // 去画一张"已经塞得进框"的图（=「完整显示」模式被裁掉一两个像素）
+        runCatching {
+            partial.setInt(
+                R.id.widget_photo_image,
+                "setScaleType",
+                spec.mode.scaleTypeOrdinal
+            )
+        }
         val set = runCatching { partial.setImageViewBitmap(R.id.widget_photo_image, bitmap) }
         if (set.isFailure) {
             Log.w(
@@ -173,7 +188,8 @@ internal object PhotoAutoAdvance {
         if (any) {
             Log.i(
                 TAG,
-                "自动换图 → 第 ${at + 1}/${photos.size} 张 框=${contentDp}x${boxDp}dp " +
+                "自动换图 → 第 ${at + 1}/${photos.size} 张 框=${contentDp}x${boxDp}dp 样式=$spec " +
+                    "scaleType=${spec.mode.scaleTypeOrdinal} " +
                     "bitmap=${bitmap.width}x${bitmap.height}/" +
                     "${PhotoBitmap.sizeLabel(PhotoBitmap.byteCount(bitmap))} set=ok(partial)"
             )

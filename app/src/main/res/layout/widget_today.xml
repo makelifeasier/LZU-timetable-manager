@@ -146,6 +146,12 @@
       但它是个可滚动的 AdapterView：竖直手势被它吃掉，课程列表就滑不动了 ——
       真机反馈"自动轮播启动后小组件无法使用"就是它。现在自动换图改由 PhotoAutoAdvance
       定时局部重画这一个 ImageView，整块布局里没有任何会吃手势的轮播控件。
+
+      下面 ImageView 的 scaleType="centerCrop" 是**默认显示方式（填满）**的取值，
+      代码里的「显示方式」开关会按模式覆盖它（RemoteViews.setInt "setScaleType"）：
+        · 填满（裁剪）  → CENTER_CROP(6)，与这里的默认值一致 = 老行为，不设也一样；
+        · 完整显示      → FIT_CENTER(3)，位图已经按"塞得进框"的尺寸做好，缩上去居中、一个像素都不裁。
+      所以这个属性不是"写死的画法"，而是**取不到用户偏好时的兜底**（老用户就是这条路）。
     -->
     <FrameLayout
         android:id="@+id/widget_photo_area"
