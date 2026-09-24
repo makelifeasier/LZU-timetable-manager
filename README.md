@@ -18,8 +18,8 @@ App 自己把**你自己的**课表链接找出来并记住。
 > 校名、教务系统名称等归各自权利人所有。
 
 - 包名 `app.timetable` · 版本 3.3 · minSdk 31（Android 12+）· targetSdk 36
-- APK 体积约 2.4 MB · 无第三方运行时依赖（仅 Android framework + Kotlin stdlib）
-- 200 个单元测试 · MIT License
+- APK 体积约 2.7 MB · 无第三方运行时依赖（仅 Android framework + Kotlin stdlib）
+- 462 个单元测试 · MIT License
 
 > **iOS 版**在 [`ios/`](ios/README.md)：SwiftUI + WidgetKit 的同源移植，解析器/周次/链接发现逐条对应。
 > ⚠️ 那份代码**从未编译过**（开发机是 Windows，没有 macOS），需要你在 Mac 上跑一次它的单测来完成验证；
@@ -299,7 +299,7 @@ v2.0 只扫一遍门户首页就下结论：扫到 0 条候选 → 退回兜底�
 
 ```powershell
 $env:JAVA_HOME = "<你的 JDK 17 目录，如 C:\Program Files\Eclipse Adoptium\jdk-17.x.x-hotspot>"
-.\gradlew.bat testDebugUnitTest    # 跑单测（200 个）
+.\gradlew.bat testDebugUnitTest    # 跑单测（462 个）
 .\gradlew.bat assembleDebug        # 调试包（含自检广播，仅测试用）
 .\gradlew.bat assembleRelease      # 正式包（未配签名时为未签名包）
 ```
