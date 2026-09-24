@@ -242,17 +242,38 @@ internal object WidgetData {
 
     /** 能放下的整行数（自动 1..4；手动指定时照办，1..6） */
     fun visibleRows(context: Context): Int =
-        rowsFor(widgetHeightDp(context), manualRows(context), naturalSlotDp(context))
+        rowsFor(
+            widgetHeightDp(context),
+            manualRows(context),
+            naturalSlotDp(context),
+            photoReserveDp(context)
+        )
 
     /**
      * 纯函数核心（可单测）：给定组件高度，能排下几整行。
      *
      * 与 [visibleRows] 同源，抽出来是为了能在单测里把"90dp 的最小格子"整条链路
      * （采用高度 → 收页脚 → 整行数）跑一遍，不必造 Context。
+     *
+     * [reserveDp] 是**底部图片区先占走的预留高度**（[photoReserveDp]，没开图片时恒为 0）。
+     * 为什么先扣它再算行数（真机反馈："向下拉只是多出一行课，图片还是那么扁"）：
+     *   - 扣掉预留 = "这块高度是图片的，别拿来排行" → 同一档高度里拖动组件，行数**不变**，
+     *     多出来的高度全部落到图片上；
+     *   - 攒够一整行（[ROW_SLOT_DP]）之后才会多出一行课，同时图片回到理想高度 ——
+     *     所以"行数固定"是**一段区间内**固定，而不是永远钉死（永远钉死就没法用高格子看更多课了）。
+     * 默认值 0 让所有老调用方（与老单测）逐字保持原语义。
+     *
+     * **手动指定行数时不看预留**（用户说了几行就是几行，见 [resolveRows]）：图片拿剩下的部分，
+     * 剩下的不够硬底线（[PHOTO_HARD_MIN_DP]）时干脆不显示 —— 用户明确要了行数，就别跟他抢。
      */
-    fun rowsFor(heightDp: Int, manualRows: Int, slotDp: Float = ROW_SLOT_DP): Int {
+    fun rowsFor(
+        heightDp: Int,
+        manualRows: Int,
+        slotDp: Float = ROW_SLOT_DP,
+        reserveDp: Int = 0
+    ): Int {
         val chrome = if (compactFor(heightDp, manualRows, slotDp)) CHROME_DP - FOOTER_DP else CHROME_DP
-        val available = (heightDp.toFloat() - chrome).coerceAtLeast(0f)
+        val available = (heightDp.toFloat() - chrome - reserveDp).coerceAtLeast(0f)
         return resolveRows(available, slotDp, manualRows)
     }
 
@@ -297,12 +318,95 @@ internal object WidgetData {
     }
 
     // ------------------------------------------------- 列表下方的扩展区（每日一句 / 图片）
+    //
+    // 这一段有两个数字决定观感，而且必须**同源**，否则"框"和"图"又会打架：
+    //  1. [photoHeightForWidthDp] —— 图片框的**理想**高度，只由宽度决定（16:9）；
+    //  2. [photoReserveDp] —— 排行数之前先扣掉的预留高度，用的就是同一个理想高度。
+    // 只要两处取同一个值，"行数不变、多出来的高度归图片"就自动成立（见 [rowsFor]）。
+
+    /**
+     * 图片框的理想宽高比：**宽 : 高 = 16 : 9**。
+     *
+     * 为什么改成"只由宽度决定"（老代码是按组件高度在 0.72 / 1.15 之间跳）：
+     *  - 老算法里同一个框随高度变比例，而照片比例是固定的，于是 `centerCrop` 每次裁在
+     *    不同的位置 —— 真机反馈的"窗口和图片大小不匹配"就是这么来的；
+     *  - 拉宽组件时图片应当跟着变大，比例由宽度定就自然有这个效果（拉宽 → 更宽也更高）。
+     *
+     * 为什么是 16:9 而不是 2:1：16:9 是相册/截图/视频最通用的横向比例，把一张 4:3 的竖构图
+     * 按它居中裁剪还能保留约 75% 的高度（主体多半还在）；2:1 只剩 2/3，人像的头部容易被切掉。
+     */
+    const val PHOTO_ASPECT = 16f / 9f
+
+    /**
+     * 纯函数（可单测）：按图片框的**内容宽度**（dp）算它的理想高度。
+     *
+     * 取不到宽度（部分启动器不上报）时给 [PHOTO_MIN_DP]：宁可小一点，也别按瞎猜的比例乱算。
+     * 上下一夹 [PHOTO_MIN_DP]..[PHOTO_MAX_DP]：太小的格子里再扁也得能看出是"一张图"，
+     * 太大的格子里图片也不该喧宾夺主（整块都成了图，就不是课表组件了）。
+     */
+    fun photoHeightForWidthDp(contentWidthDp: Int): Int {
+        if (contentWidthDp <= 0) return PHOTO_MIN_DP
+        return Math.round(contentWidthDp / PHOTO_ASPECT).coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
+    }
+
+    /** 当前格子宽度下，图片框的**理想**高度（dp） */
+    fun photoIdealHeightDp(context: Context): Int =
+        photoHeightForWidthDp(contentWidthDp(context))
+
+    /**
+     * 图片区**先占走**的预留高度（dp）= 理想图片高度 + 它的 6dp 上边距；没开图片时是 0。
+     *
+     * 三个"0"的场合，都是为了让不用图片的人完全不受这次改动影响：
+     *  - 图片开关没开 / 一张图都没有 → 没有图片区，没什么可预留的；
+     *  - [Prefs.widgetExtrasOverride] = -1（用户强制隐藏）→ 预留了反而白少一行课。
+     *
+     * **刻意不给"每日一句"预留**：句子只要 22dp，两样都开时由 [ExtrasPlanner] 从同一个预算里
+     * 分（先扣句子、剩下的归图片）。宁可图片因此扁一档，也不为了图片的 16:9 去多扣一行课 ——
+     * 课表组件里，课程行数比图片的精确比例重要。
+     */
+    fun photoReserveDp(context: Context): Int {
+        Prefs.init(context)
+        if (Prefs.widgetExtrasOverride < 0) return 0
+        if (!Prefs.photoEnabled) return 0
+        if (photoList(context).isEmpty()) return 0
+        return photoIdealHeightDp(context) + AREA_GAP_DP
+    }
+
+    /**
+     * 纯函数（可单测）：图片框这一次**实际**能有高度（dp）。
+     *
+     * 与"理想高度"的区别：理想值是"16:9 该多高"，这里是"列表下方真剩多少" ——
+     * 不够一整行的那些余量（0..37dp）全部归图片，所以实际框会比 16:9 或扁或方一点。
+     * 这不违反"框和图同比例"：解码就按这个框的像素尺寸来（[PhotoBitmap.targetPx] + 居中裁剪），
+     * **框和位图永远同一个宽高比**，既不会拉伸，也不会露缝。
+     *
+     * 两个上限，都是"别再长了"的意思：
+     *  - [PHOTO_MAX_DP]：再高就不是"课表下面一张配图"了，而且白白多传像素过 binder；
+     *  - **不比框自己还高**（`contentWidthDp`）：组件又高又窄时（行数已经被
+     *    [AUTO_MAX_ROWS] 封顶、余量却还有很多），光按余量算会把框拉成一个**竖着的框** ——
+     *    横构图的照片裁成竖构图会切掉大半，用户之前就吐槽过"近似正方形的块"。
+     *    到这一步宁可把多余的几 dp 留白，也不把框竖过来。
+     */
+    fun photoBoxTargetDp(
+        availableDp: Int,
+        contentWidthDp: Int,
+        gapDp: Int = AREA_GAP_DP
+    ): Int {
+        val hardMax = minOf(PHOTO_MAX_DP, maxOf(contentWidthDp, 1))
+        return (availableDp - gapDp).coerceIn(0, hardMax)
+    }
 
     /**
      * 列表下方还剩多少 dp 可用。
      *
      * 计算方式：上报高度 − 头部页脚（chrome）− 课程列表占用的整行高度。
      * 根布局是 match_parent、子控件自顶向下排列，所以余量就落在底部。
+     *
+     * **注意**：[visibleRows] 已经把 [photoReserveDp] 扣掉了，所以这里返回的余量**包含
+     * 那块预留**（理想图片高度 + 上边距 + 不足一行的零头）。于是"开了图片却什么都看不到"
+     * 只剩一种可能：格子被压得极小（90dp 那种最小尺寸）—— 连留着的那几 dp 都不够图片的硬底线
+     * [PHOTO_HARD_MIN_DP]，那就只好不显示（宁可不显示，也不要一条 5dp 的彩条）。
+     * 其余情况（≥150dp 的格子）图片一定会出来，不会再被"余量不足"吃掉。
      *
      * **这是估算**：上报高度本身在个别启动器上不准（荣耀把声明值当高度上报，见
      * [looksLikeDeclaredEcho]），所以调用方一律"宁可少显示"：只要不确定就隐藏，
@@ -353,36 +457,9 @@ internal object WidgetData {
         return (w - CONTENT_INSET_DP).coerceAtLeast(1)
     }
 
-    /**
-     * 图片框的**理想**高度（dp）—— 注意是"理想"，最终给多高由 [ExtrasPlanner] 按真实余量裁。
-     *
-     * 按小组件的宽高比自适应：竖长时做高一点，宽扁时做矮一点（优先保住课程行）。
-     */
-    fun photoHeightDp(context: Context): Int {
-        val opts = widgetOptions(context) ?: return PHOTO_MIN_DP
-        return photoHeightDpFor(
-            opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH),
-            opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
-        )
-    }
-
-    /**
-     * 纯函数（可单测）：由小组件的**格子**宽高（dp）算出图片框的理想高度。
-     *
-     * **按内容宽度算，不是格子宽度**：小组件根布局左右各有 12dp 内边距（`widget_today.xml`），
-     * 图片框自己只有 `match_parent` 的**内容宽度**。以前拿格子宽度 `w` 直接乘比例，
-     * 等于按"比实际宽 24dp 的框"算高度 —— 在窄组件上会把图片框算成一个**近乎正方形的块**
-     * （真机反馈里的"右边一个近似正方形的块"就有它一份：126dp 内容宽 × 150dp 高）。
-     * 扣掉内边距之后，"宽扁→接近方形、竖长→长方形"这个意图才真的成立。
-     *
-     * 取不到尺寸（部分启动器不上报）时给 [PHOTO_MIN_DP]，属于"宁可小一点也别乱猜"。
-     */
-    fun photoHeightDpFor(widthDp: Int, heightDp: Int): Int {
-        if (widthDp <= 0 || heightDp <= 0) return PHOTO_MIN_DP
-        val contentDp = (widthDp - CONTENT_INSET_DP).coerceAtLeast(1)
-        val ratio = if (heightDp >= widthDp) 1.15f else 0.72f
-        return (contentDp * ratio).toInt().coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
-    }
+    // 图片框的"理想高度"现在只有一处定义：[photoHeightForWidthDp]（按内容宽度算 16:9）。
+    // 老代码里那个按格子宽高在 0.72 / 1.15 之间跳的 photoHeightDpFor(width, height) 已删除 ——
+    // 它正是"同一个框比例飘忽、图被裁得怪"的源头，留着只会再被误用。
 
     /** 当前小组件的 options（取不到返回 null） */
     private fun widgetOptions(context: Context): android.os.Bundle? {
@@ -422,7 +499,13 @@ internal object WidgetData {
      */
     const val CONTENT_INSET_DP = 24
 
-    /** 图片框的最小/最大高度（dp） */
+    /**
+     * 图片框的**理想高度**下限/上限（dp）。
+     *
+     * [PHOTO_MIN_DP]：按 16:9 算出来时不会低于这个高度（低于它连"一条图"都算不上）；
+     * [PHOTO_MAX_DP]：也不会高于它 —— 既是观感上限（再高就不是课表下方的配图了），
+     * 也顺手把过 binder 的像素数量按住（见 [PhotoBitmap.MAX_BITMAP_BYTES]）。
+     */
     const val PHOTO_MIN_DP = 56
     const val PHOTO_MAX_DP = 150
 

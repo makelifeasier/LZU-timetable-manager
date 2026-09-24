@@ -171,13 +171,29 @@ internal class DayEditDialog(
 
     private fun refreshLabels() {
         val week = page + 1
-        pageLabel.text = "第 $week 周 · ${Session.dayLabel(day)}"
+        // 把单双周明写出来：用户原话是"调一天的是可以选单双周中的任意一天"，
+        // 而单双周的课本来就是按周奇偶显示的 —— 不标出来的话，左右翻周时
+        // 看到"第 3 周有课、第 4 周没课"会莫名其妙（其实那门课就是单周课）。
+        val parity = if (week % 2 == 1) "单周" else "双周"
+        val count = WeekCalc.merge(WeekCalc.sessionsFor(TimetableRepository.result(), day, week)).size
+        pageLabel.text = "第 $week 周（$parity） · ${Session.dayLabel(day)} · " +
+            if (count == 0) "没课" else "$count 节"
         val o = DayOverrides.get(ctx, date)
-        statusLine.text = when (o?.mode) {
-            null -> "这一天还没调整过"
-            DayOverrides.Mode.REPLACE -> "已调整：替换为第 ${o.sourceWeek} 周这天"
-            DayOverrides.Mode.CLEAR -> "已调整：当天课全部取消"
-            DayOverrides.Mode.ADD -> "已调整：额外加了 ${o.extra.size} 节课"
+        statusLine.text = when {
+            o == null -> "这一天还没调整过"
+            // 「单独改过某一节」在数据上是"这一天的课表就是这份列表"。
+            // 它的载体 mode 是 CLEAR（见 DayOverrides 的注释），所以必须先判 isList，
+            // 否则这里会显示成"当天课全部取消"—— 明明还有课，文案却是全取消，很误导。
+            o.isList -> if (o.extra.isEmpty()) {
+                "已调整：这一天的课都被删掉了"
+            } else {
+                "已调整：这一天有 ${o.extra.size} 节课是单独改过的"
+            }
+
+            o.mode == DayOverrides.Mode.REPLACE -> "已调整：替换为第 ${o.sourceWeek} 周这天"
+            o.mode == DayOverrides.Mode.CLEAR -> "已调整：当天课全部取消"
+            o.mode == DayOverrides.Mode.ADD -> "已调整：额外加了 ${o.extra.size} 节课"
+            else -> "已调整"
         }
     }
 

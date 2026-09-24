@@ -27,6 +27,7 @@ import app.timetable.greet.LunarCalendar
 import app.timetable.notify.Notifications
 import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
+import app.timetable.ui.CourseEditorDialog
 import app.timetable.ui.StylePreviewView
 import app.timetable.ui.TimetableRenderer
 import app.timetable.ui.Ui
@@ -101,6 +102,7 @@ class SettingsActivity : BaseActivity() {
         }
 
         buildSource()
+        buildMyCourses()
         buildAccount()
         buildWeek(today, w1, realWeek)
         buildReminder()
@@ -108,6 +110,24 @@ class SettingsActivity : BaseActivity() {
         buildGreeting()
         buildMisc()
         buildSupport()
+    }
+
+    /**
+     * 「我的课程」：自己加教务系统里没有的课（实验课、重修、辅导班……）。
+     *
+     * 放在「课表来源」下面，因为它回答的是同一个问题："我的课表里都有什么"。
+     * 加进去的课和抓回来的课走同一条数据出口（TimetableRepository.result()），
+     * 所以课表页、桌面小组件、导出图片、上课提醒四处都会认。
+     */
+    private fun buildMyCourses() {
+        sectionTitle("我的课程")
+        card {
+            row(
+                "增加课程",
+                "教务系统里没有的课可以自己加：选星期几、第几节到第几节、" +
+                    "第几周到第几周（单周/双周/每周都行）。加完之后小组件和上课提醒也认。"
+            ) { CourseEditorDialog.show(this@SettingsActivity) }
+        }
     }
 
     /**
@@ -585,11 +605,12 @@ class SettingsActivity : BaseActivity() {
                     }
                 }
                 row(
-                    "自动轮播",
+                    "自动换图",
                     if (count <= 1) {
-                        "只有 1 张图片时轮播没有任何效果 —— 再选几张才会转起来"
+                        "只有 1 张图片时不用自动换 —— 再选几张才会转起来"
                     } else {
-                        "小组件里唯一能自动切换图片的方式（横向滑动做不到，启动器会接管手势）"
+                        "不开也会自动换：在小组件的图片上**点一下**就换下一张。" +
+                            "打开这个开关只是让它按间隔自己换（更耗电，桌面组件不是动图）"
                     },
                     Switch(this@SettingsActivity).apply {
                         isEnabled = count > 1
@@ -703,7 +724,8 @@ class SettingsActivity : BaseActivity() {
 
             row(
                 "全年日历",
-                "圆点颜色对应上面的类别：公历 / 农历 / 校历。点某天可以看到当天的节日。"
+                "每个格子里直接写着那天是什么节（同一天有多个节时写最主要的一个，圆点表示还涉及哪几类）。" +
+                    "点某天可以看到当天的全部节日。"
             )
             addView(
                 YearCalendarView(this@SettingsActivity).apply {
@@ -714,39 +736,12 @@ class SettingsActivity : BaseActivity() {
                         LinearLayout.LayoutParams.WRAP_CONTENT
                     ).apply {
                         marginStart = dp(16); marginEnd = dp(16)
-                        topMargin = dp(6); bottomMargin = dp(6)
+                        topMargin = dp(6); bottomMargin = dp(14)
                     }
-                }
-            )
-            // 日历上只有一个个小圆点，用户看不出那天到底是什么节 —— 而"点某天"这个交互
-            // 是没人会主动去试的。所以把这一年有哪几天、分别是什么节直接列在下面：
-            // 一眼能看到名字，想细看再点日历上的某天。
-            val hits = Holidays.all(today().year).filter { (_, h) ->
-                when (h.kind) {
-                    Holidays.Kind.SOLAR -> Prefs.greetSolar
-                    Holidays.Kind.LUNAR -> Prefs.greetLunar
-                    Holidays.Kind.SCHOOL -> Prefs.greetSchool
-                }
-            }
-            val listText = if (hits.isEmpty()) {
-                "上面三类都关着，所以日历上没有圆点。打开任意一类，这里会列出具体节日。"
-            } else {
-                hits.joinToString("   ") { (d, h) -> "${d.monthValue}/${d.dayOfMonth} ${h.name}" }
-            }
-            addView(
-                TextView(this@SettingsActivity).apply {
-                    text = listText
-                    textSize = 12.5f
-                    setTextColor(color(R.color.text_secondary))
-                    setLineSpacing(dp(3).toFloat(), 1f)
-                    setPadding(dp(16), dp(4), dp(16), dp(14))
                 }
             )
         }
     }
-
-    /** 当前年份（抽出来是为了上面那段读起来不用再 import 一堆东西） */
-    private fun today(): LocalDate = LocalDate.now()
 
     /** 点日历上的某天：列出当天的节日（只看已启用的类别） */
     private fun showDayHolidays(date: LocalDate) {

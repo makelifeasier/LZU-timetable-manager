@@ -21,6 +21,7 @@ import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
 import app.timetable.ui.DayEditDialog
 import app.timetable.ui.GuideOverlay
+import app.timetable.ui.SessionEditDialog
 import app.timetable.ui.Ui
 import app.timetable.widget.TodayWidgetProvider
 import java.time.LocalDate
@@ -383,8 +384,27 @@ class MainActivity : BaseActivity() {
         AlertDialog.Builder(this)
             .setTitle(s.name)
             .setMessage(body)
+            .setNeutralButton("改这一节") { _, _ -> editThisSession(s) }
             .setPositiveButton("好", null)
             .show()
+    }
+
+    /**
+     * 打开「只改这一天这一节」的弹窗。
+     *
+     * 和「点表头改一整天」并存：表头是"今天整天有事"，这里是"这一节换了教室/被取消"。
+     * 日期按**当前显示的那一周**算（用户可能正翻到第 8 周在看课）。
+     */
+    private fun editThisSession(s: Session) {
+        val result = TimetableRepository.result()
+        val today = LocalDate.now()
+        val (week, _) = resolvedWeek(result, today)
+        val monday = Prefs.week1MondayDate()?.plusWeeks((week - 1).toLong())
+        if (monday == null) {
+            Toast.makeText(this, "周次还没校准，请到设置里设置第 1 周", Toast.LENGTH_SHORT).show()
+            return
+        }
+        SessionEditDialog(this, monday.plusDays((s.day - 1).toLong()), s).show()
     }
 
     private fun showToday() {

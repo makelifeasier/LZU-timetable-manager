@@ -76,6 +76,10 @@
       可滚动列表：用 ListView + RemoteViewsService 是安卓可滚动小组件的唯一正路。
       高度在运行时按「能放下几个整行」精确设置（见 TodayWidgetProvider.build），
       这样不会出现被切掉一半的第三行。这里的 94dp = 2 行，只是取不到尺寸时的兜底。
+
+      图片开着时，行数是**先扣掉图片预留高度**再算的（WidgetData.rowsFor / photoReserveDp）：
+      于是同一档高度里拖动组件，行数不变、多出来的高度归图片。这是用户要的
+      "课程数固定、向下拉图片出现在下侧"，而不是"向下拉又多一行课"。
     -->
     <ListView
         android:id="@+id/widget_list"
@@ -130,11 +134,18 @@
         android:visibility="gone" />
 
     <!--
-      图片框：一个 FrameLayout 里放两套控件，按开关切可见性 ——
-      RemoteViews 不能在运行时动态加控件，所以只能"静态并存 + setViewVisibility"。
-        · 轮播开启 → AdapterViewFlipper（小组件里唯一能自动切换的东西）
-        · 轮播关闭 → 单个 ImageView（只显示第一张）
-      尺寸由代码按小组件宽高比用 setViewLayoutWidth/Height 设置（见 TodayWidgetProvider）。
+      图片框：一个 FrameLayout 包一个 ImageView。
+        · 高度由代码按「内容宽度算出的 16:9 + 不足一整行的零头」用 setViewLayoutHeight 设置
+          （见 WidgetData.photoBoxTargetDp / WidgetExtras.apply）；
+        · **整块（这个 FrameLayout）都可点** → 换下一张（Provider 的 ACTION_NEXT_PHOTO 广播）。
+          点挂在这一层而不是里面的 ImageView：ImageView 默认不消费点击，事件照样落到这里，
+          所以"图还没解出来/留白"时点上去也有反应；这块的高度就等于图片的高度，
+          不会多占课程列表的位置，也不会抢列表的手势（ListView 自己处理自己的滑动）。
+
+      **这里不再有 AdapterViewFlipper**。曾经用它做自动轮播（宿主自己翻页），
+      但它是个可滚动的 AdapterView：竖直手势被它吃掉，课程列表就滑不动了 ——
+      真机反馈"自动轮播启动后小组件无法使用"就是它。现在自动换图改由 PhotoAutoAdvance
+      定时局部重画这一个 ImageView，整块布局里没有任何会吃手势的轮播控件。
     -->
     <FrameLayout
         android:id="@+id/widget_photo_area"
@@ -150,20 +161,5 @@
             android:layout_height="match_parent"
             android:contentDescription="@string/widget_photo_desc"
             android:scaleType="centerCrop" />
-
-        <!--
-            注意：这里**不能**写 android:inAnimation / outAnimation。
-            AdapterViewAnimator（API 30+）用 AnimatorInflater 加载这两个属性，
-            而 @android:anim/fade_in 是老的 View 动画资源 —— 加载时会抛
-            "Unknown animator name: alpha"，整个小组件 inflate 失败（整块变成空白）。
-            不指定就用自己的默认值，切换动画照样有。
-        -->
-        <AdapterViewFlipper
-            android:id="@+id/widget_photo_flipper"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:autoStart="true"
-            android:flipInterval="10000"
-            android:visibility="gone" />
     </FrameLayout>
 </LinearLayout>

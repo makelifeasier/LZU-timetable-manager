@@ -92,6 +92,59 @@ class PhotoBitmapTest {
         assertEquals(1, PhotoBitmap.sampleSizeAtLeast(1600, 1066, 0, 0))
     }
 
+    // ------------------------------------------------------ 框与位图必须同比例
+
+    @Test
+    fun decodedPixelsKeepTheFrameAspectRatio() {
+        // 本轮的核心（用户："显示窗口和图片大小不匹配"）：解码尺寸 = **框的真实尺寸**。
+        // 典型窄格子：内容宽 126dp → 16:9 的框高 71dp，density 2.625
+        val boxW = 126
+        val boxH = WidgetData.photoHeightForWidthDp(boxW)
+        assertEquals(71, boxH)
+
+        val p = PhotoBitmap.targetPx(boxW, boxH, 2.625f)
+        assertEquals(331, p[0])   // ceil(126 × 2.625) = 331
+        assertEquals(187, p[1])   // ceil(71 × 2.625) = 187
+
+        // 位图比例必须≈框比例（差的这一点只是 dp→px 的向上取整）：
+        // 比例一致，宿主的 centerCrop 就裁不到东西 —— 既不会拉伸，也不会露缝
+        val frameRatio = boxW.toFloat() / boxH
+        val bitmapRatio = p[0].toFloat() / p[1]
+        assertTrue(
+            "框 $frameRatio vs 位图 $bitmapRatio 不该差出一个像素以上",
+            Math.abs(frameRatio - bitmapRatio) < 0.01f
+        )
+        // 体积：331×187×2B ≈ 121KB，离 400KB 预算还有三倍余量
+        assertTrue(p[0] * p[1] * PhotoBitmap.BYTES_PER_PIXEL <= PhotoBitmap.MAX_BITMAP_BYTES)
+    }
+
+    @Test
+    fun worstCaseFrameStaysInsideTheBinderBudget() {
+        // 最坏情况（超宽组件撞上高度上限 + 高密度）：内容宽 296dp、框高 150dp、density 2.625
+        // → 777×394 是 612KB，必须等比缩小才过得了 binder
+        val p = PhotoBitmap.targetPx(296, 150, 2.625f)
+        val bytes = p[0].toLong() * p[1].toLong() * PhotoBitmap.BYTES_PER_PIXEL
+        assertTrue("$bytes 字节超了预算（超了整次更新会被系统丢掉）", bytes <= PhotoBitmap.MAX_BITMAP_BYTES)
+        // 缩小是**等比**的：比例一变，框和图又不匹配了
+        val ratio = p[0].toFloat() / p[1]
+        assertTrue("等比缩小不能改掉宽高比：$ratio", Math.abs(ratio - 296f / 150f) < 0.02f)
+    }
+
+    // ------------------------------------------------------ 日志里能读的数字
+
+    @Test
+    fun labelsGiveReadableNumbersForTheLog() {
+        // 用户看不到画面，只能看日志：尺寸 / 体积 / 比例都要能一眼读出来
+        assertEquals("1.77:1", PhotoBitmap.ratioLabel(126, 71))
+        assertEquals("2.50:1", PhotoBitmap.ratioLabel(300, 120))
+        // 尺寸取不到时不给假的默认值，直接问号
+        assertEquals("?", PhotoBitmap.ratioLabel(0, 71))
+        assertEquals("?", PhotoBitmap.ratioLabel(126, 0))
+        // 体积按最接近的 KB 报（121KB 的位图不会显示成 0KB）
+        assertEquals("118KB", PhotoBitmap.sizeLabel(121_000))
+        assertEquals("1KB", PhotoBitmap.sizeLabel(600))
+    }
+
     // ------------------------------------------------------ 与声明尺寸一致
 
     @Test

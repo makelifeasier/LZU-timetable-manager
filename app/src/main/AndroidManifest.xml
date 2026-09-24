@@ -55,13 +55,11 @@
                 android:resource="@xml/widget_today_info" />
         </receiver>
 
-        <!-- 底部图片轮播的数据源。和列表一样，集合视图必须由 RemoteViewsService 供数 -->
-        <service
-            android:name=".widget.PhotoWidgetService"
-            android:exported="false"
-            android:permission="android.permission.BIND_REMOTEVIEWS" />
-
-        <!-- 小组件可滑动列表的数据源；BIND_REMOTEVIEWS 是集合视图的强制要求 -->
+        <!--
+          小组件可滑动列表的数据源；BIND_REMOTEVIEWS 是集合视图的强制要求。
+          （底部图片轮播的 PhotoWidgetService 已删除：那个 AdapterViewFlipper 会吃掉竖直手势，
+           导致课程列表滑不动。图片区现在是普通 ImageView，点一下换一张。）
+        -->
         <service
             android:name=".widget.TimetableWidgetService"
             android:exported="false"

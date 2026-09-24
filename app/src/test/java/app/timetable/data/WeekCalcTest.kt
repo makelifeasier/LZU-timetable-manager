@@ -163,9 +163,10 @@ class WeekCalcTest {
 
     @Test
     fun guessesAutumnWeek1FromSeptember() {
-        // 2026 秋季：9/1 是周二 → 第 1 周周一 = 9/7
+        // 2026 秋季：9/1 是周二 → 第 1 周周一 = **8/31**
+        // （用户实测：兰大秋季学期 8.31–9.6 就是第 1 周；旧规则"9/1 之后第一个周一"会给 9/7，整整差一周）
         assertEquals(
-            LocalDate.of(2026, 9, 7),
+            LocalDate.of(2026, 8, 31),
             WeekCalc.guessWeek1Monday("2026", "秋", LocalDate.of(2026, 10, 20))
         )
     }
@@ -181,9 +182,10 @@ class WeekCalcTest {
 
     @Test
     fun autumnGuessGivesPlausibleWeekNumber() {
-        // 关键：第 8 周才装上 App 的同学，必须看到「第 8 周」而不是「第 1 周」
+        // 关键：第 8 周才装上 App 的同学，必须看到「第 8 周左右」而不是「第 1 周」
+        // 第 1 周周一 = 8/31 → 10/27 是第 9 周（按旧规则 9/7 起算则是第 8 周）
         val w1 = WeekCalc.guessWeek1Monday("2026", "秋", LocalDate.of(2026, 10, 27))!!
-        assertEquals(8, WeekCalc.weekOf(LocalDate.of(2026, 10, 27), w1))
+        assertEquals(9, WeekCalc.weekOf(LocalDate.of(2026, 10, 27), w1))
     }
 
     @Test
@@ -209,9 +211,10 @@ class WeekCalcTest {
             javaClass.classLoader!!.getResourceAsStream("timetable-2026autumn.html")!!
                 .readBytes().toString(Charsets.UTF_8)
         )
-        // fixture 是 2026 秋 → 应估出 9/7，而不是「本周=第1周」
+        // fixture 是 2026 秋 → 应估出 8/31（新学期默认值，见 guessesAutumnWeek1FromSeptember），
+        // 而不是「本周=第1周」
         assertEquals(
-            LocalDate.of(2026, 9, 7),
+            LocalDate.of(2026, 8, 31),
             WeekCalc.initialWeek1Monday(result, LocalDate.of(2026, 10, 27))
         )
     }

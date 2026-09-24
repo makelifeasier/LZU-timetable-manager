@@ -258,7 +258,7 @@ object Prefs {
         get() = b("photoFlipEnabled")
         set(v) = sp.edit().putBoolean("photoFlipEnabled", v).apply()
 
-    /** 轮播间隔（秒），只允许 5/10/30 */
+    /** 自动换图间隔（秒），只允许下面列出的几档 */
     var photoFlipSeconds: Int
         get() = i("photoFlipSeconds", 10)
         set(v) = sp.edit().putInt("photoFlipSeconds", if (v in PHOTO_FLIP_CHOICES) v else 10).apply()
@@ -349,8 +349,14 @@ object Prefs {
         e.apply()
     }
 
-    /** 轮播间隔可选值（秒）。注意：属性初始化有先后顺序，所以这两行必须放在引用它们之前 */
-    private val PHOTO_FLIP_CHOICES = listOf(5, 10, 30)
+    /**
+     * 自动换图间隔可选值（秒）。注意：属性初始化有先后顺序，所以这两行必须放在引用它们之前。
+     *
+     * 下限是 **10 秒**：更快的档位（例如 5 秒）看着像"更流畅"，实际是把小组件变成每 5 秒
+     * 唤醒一次的后台定时器 —— 桌面组件不是动图，耗电换来的观感提升并不值。所以 5 秒档去掉了，
+     * 想要"手动换"就用点击（图片区点一下换下一张，不耗电）。
+     */
+    private val PHOTO_FLIP_CHOICES = listOf(10, 30, 60)
 
     /** 供设置页渲染 chips 用 */
     val photoFlipChoices = PHOTO_FLIP_CHOICES

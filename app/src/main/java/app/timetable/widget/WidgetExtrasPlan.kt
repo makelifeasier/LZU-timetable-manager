@@ -43,6 +43,15 @@ internal class ExtrasPlan(
  * - `0` 自动：上面的余量规则；
  * - `1` 强制显示：**跳过余量判断**（少数机型上报的高度根本是错的，按它算必然是"显示不出来"），
  *   按理想尺寸把开着的都摆上去。放不下的部分交给系统裁 —— 这是用户自己选的档位。
+ *
+ * ## 本轮（删掉图片轮播之后）语义上的一个变化
+ *
+ * 以前"行数先按整个高度算完，剩下的零头再看够不够放图"，于是零头常常只有几个 dp ——
+ * 用户开了图片却什么也看不见。现在算行数时**先把图片预留扣掉**（[WidgetData.rowsFor] 的
+ * `reserveDp`），所以传进来的 [plan] 的 `availableDp` 天然含着一块图片的高度：
+ * 只要行数算得出来、格子不是被压到最小尺寸，图片就一定会显示。
+ * 另外 [plan] 的 `idealPhotoDp` 现在也应传[WidgetData.photoBoxTargetDp]（"这次框实际能有多高"），
+ * 而不是固定的 16:9 理想值 —— 多出来的、不够一整行的零头就是靠它归到图片上的。
  */
 internal object ExtrasPlanner {
 
@@ -51,8 +60,10 @@ internal object ExtrasPlanner {
      * @param quoteEnabled   每日一句开关
      * @param photoEnabled   图片开关
      * @param photoCount     实际存在的图片张数（0 张等于没开）
-     * @param availableDp    列表下方的真实余量（[WidgetData.extraSpaceDp]）
-     * @param idealPhotoDp   按宽高比算出来的**理想**图片高度（[WidgetData.photoHeightDp]）
+     * @param availableDp    列表下方的真实余量（[WidgetData.extraSpaceDp]）。**图片开着时它已经
+     *                       包含给图片预留的那一块**（见 [WidgetData.photoReserveDp]）
+     * @param idealPhotoDp   这次图片框**实际**能有多高（[WidgetData.photoBoxTargetDp]）；
+     *                       不再是"按宽高比算出来的固定理想值"，那样多出来的零头就浪费了
      * @param quoteCostDp    一句话的占用（含它自己的 6dp 上边距）
      * @param minPhotoDp     图片框的**硬底线**：低于这个高度就不是"一张图"而是一条彩条了
      * @param gapDp          图片框的 6dp 上边距（布局里写死的，必须算进预算）

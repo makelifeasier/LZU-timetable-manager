@@ -50,8 +50,13 @@ internal object PhotoBitmap {
     /**
      * 纯函数（可单测）：图片框要显示多大（dp）→ 该解码成多少像素。
      *
+     * 这两个 dp 值就是**框的真实尺寸**（框宽 = [WidgetData.contentWidthDp]，
+     * 框高 = [WidgetData.photoBoxTargetDp] 经 [ExtrasPlanner] 分下来的结果），
+     * 所以解出来的位图与框**逐值同比例** —— 宿主那边 `centerCrop` 实际裁不到东西，
+     * 既不会被拉伸，也不会露缝。"窗口和图片大小不匹配"就是这么消掉的。
+     *
      * @param widthDp  图片框的内容宽度（[WidgetData.contentWidthDp]）
-     * @param heightDp 这次分给图片框的高度（[ExtrasPlanner] 的结论）
+     * @param heightDp 这次分给图片框的高度（[WidgetData.photoBoxTargetDp] / [ExtrasPlanner] 的结论）
      */
     fun targetPx(widthDp: Int, heightDp: Int, density: Float): IntArray {
         val w = Math.ceil(widthDp.coerceAtLeast(1) * density.toDouble()).toInt().coerceAtLeast(1)
@@ -86,13 +91,28 @@ internal object PhotoBitmap {
     fun sizeLabel(bytes: Int): String = "${(bytes + 512) / 1024}KB"
 
     /**
+     * 纯函数（可单测）：人类可读的宽高比（日志里用），例如 126×71dp → "1.77:1"。
+     *
+     * 为什么要打这个：用户看不到画面，只能看日志。而"框和图比例对不对"这件事
+     * 在日志里就是一串数字 —— 框的比例、bitmap 的像素数、byteCount 三者放在一起，
+     * 就能判断是"框算错了"还是"解码没跟上"。宽高取不到时给 "?"（不掺假的默认值）。
+     */
+    fun ratioLabel(widthDp: Int, heightDp: Int): String {
+        if (widthDp <= 0 || heightDp <= 0) return "?"
+        return String.format(java.util.Locale.CHINA, "%.2f:1", widthDp.toFloat() / heightDp)
+    }
+
+    /**
      * 解码一张图到"显示所需的最小尺寸"。
      *
      * 返回 null 表示这张图用不了（文件被删、损坏、不是图片……）—— 调用方应当**跳过它、
      * 换下一张**，而不是让整块图片区（甚至整个小组件）跟着空白。
      *
-     * 会在**调用线程**上做解码：因为已经降采样到目标尺寸，实际工作量是几百微秒级。
-     * 集合视图的 [PhotoFactory.getViewAt] 本来就在 binder 线程上跑，不受主线程影响。
+     * 会在**调用线程**上解码。删掉图片轮播（AdapterViewFlipper + RemoteViewsService）之后，
+     * 调用点就是小组件刷新本身（广播接收器的主线程）—— 已经降采样到"框的像素尺寸"，
+     * 单张是几毫秒级（相册原图 1600px 先按 2 的幂降到接近目标，再裁再缩）。
+     * 这是删轮播的必然结果：那套是在集合视图的 binder 线程上按项解码的，代价是它顺手把
+     * 竖直手势也吃掉了（"开了轮播小组件就没法用"）。宁可主线程多花几毫秒，也不要一个滑不动的小组件。
      */
     fun decode(context: Context, path: String, targetW: Int, targetH: Int): Bitmap? = runCatching {
         val file = File(path)

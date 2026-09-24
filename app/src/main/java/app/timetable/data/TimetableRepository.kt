@@ -31,6 +31,27 @@ object TimetableRepository {
     private val main = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
 
+    /**
+     * 教务系统解析出来的**原始**结果。只由 init / reloadFromPrefs / commit 写入。
+     *
+     * 自定义课程**不**往这里写，也不写回 `Prefs.resultJson`：那是下一次同步会被整份覆盖的
+     * 原始数据缓存，混进去第一次自动同步就没了（理由详见 [UserCourses] 的文件头注释）。
+     */
+    @Volatile
+    private var rawParsed: ParseResult = ParseResult()
+
+    /** 用户自己加的课（进程内副本，内容和 [UserCourses] 的存储一致） */
+    @Volatile
+    private var userSessions: List<Session> = emptyList()
+
+    /**
+     * 对外统一的课表 = [rawParsed] + 自定义课程。
+     *
+     * 为什么合并只在这一层做一次：`sessionsOn` / `weekGrid` / `WeekCalc.agenda` /
+     * 课表页 / 桌面小组件 / 导出图片 / 上课提醒，读的都是 `result()`（或经由 `sessionsOn`）。
+     * 把合并放进这个唯一的读取入口，就不会再出现"App 里看得见、小组件里没有"那种
+     * 各条链路各合并一遍才会有的不一致。
+     */
     @Volatile
     private var cached: ParseResult = ParseResult()
 
@@ -40,20 +61,34 @@ object TimetableRepository {
 
     fun init(context: Context) {
         Prefs.init(context)
-        cached = TimetableJson.fromJson(Prefs.resultJson)
+        rawParsed = TimetableJson.fromJson(Prefs.resultJson)
+        reloadUserCourses(context)
         status = SyncStatus(
-            ok = Prefs.lastSyncAt > 0 && cached.sessions.isNotEmpty(),
+            // 这里的"同步成功/N 段课"说的都是**教务抓回来的量**，不含用户自己加的课：
+            // 状态行是用来判断"同步这件事成没成"的，把自定义课程算进去会让它自相矛盾。
+            ok = Prefs.lastSyncAt > 0 && rawParsed.sessions.isNotEmpty(),
             message = Prefs.lastSyncMessage.ifBlank { "尚未同步" },
             httpCode = Prefs.lastHttpCode,
             finalUrl = Prefs.lastFinalUrl,
             bytes = Prefs.lastHtmlBytes,
-            sessionCount = cached.sessions.size,
+            sessionCount = rawParsed.sessions.size,
             loginExpired = Prefs.loginExpired,
             at = Prefs.lastSyncAt
         )
     }
 
     fun result(): ParseResult = cached
+
+    /** 重新拼出对外的课表（教务原始 + 自定义）。任何一方变了都要调一次 */
+    private fun republish() {
+        cached = UserCourses.mergeInto(rawParsed, userSessions)
+    }
+
+    /** 从存储里重读自定义课程并重新拼装。启动、重新导入、用户增删改之后各调一次 */
+    private fun reloadUserCourses(context: Context) {
+        userSessions = UserCourses.sessions(context)
+        republish()
+    }
 
     // ------------------------------------------------- 当日调课（覆盖）统一入口
 
@@ -75,13 +110,17 @@ object TimetableRepository {
         // 不合并的话「第5节+第6节」会显示成两行，与没调课时的表现不一致。
         val o = DayOverrides.get(context, date) ?: return WeekCalc.merge(base)
         return WeekCalc.merge(
-            when (o.mode) {
+            when {
+                // 「整份列表」模式：这一天完全由 extra 给出（用户点某一节课改掉/删掉了它）。
+                // 合并相邻节次那一步在 DayOverrides.listFor 里，和纯逻辑测试共用同一段代码。
+                o.isList -> DayOverrides.listFor(o, day)
+
                 // 替换：换成"另一周的同一星期几"
-                DayOverrides.Mode.REPLACE ->
+                o.mode == DayOverrides.Mode.REPLACE ->
                     if (o.sourceWeek < 1) base else WeekCalc.sessionsFor(r, day, o.sourceWeek)
 
-                DayOverrides.Mode.CLEAR -> emptyList()
-                DayOverrides.Mode.ADD -> DayOverrides.mergeSorted(base, o.extra, day)
+                o.mode == DayOverrides.Mode.CLEAR -> emptyList()
+                else -> DayOverrides.mergeSorted(base, o.extra, day)
             }
         )
     }
@@ -110,6 +149,11 @@ object TimetableRepository {
     /** 设置变更后：重排提醒 + 刷新小组件 + 通知 UI */
     fun notifyDataChanged(context: Context) {
         val app = context.applicationContext
+        // 顺带重读自定义课程：加了/改了/删了自己的课之后，对话框只需要调这一个方法，
+        // 课表页、小组件、导出图片、提醒就会一起换成新数据 —— 依旧是"一个入口收口"。
+        // （重读的是内存里的 SharedPreferences 加一份小 JSON，代价可以忽略；
+        //   这个方法的调用频率是"用户点一下设置"级别。）
+        reloadUserCourses(app)
         TodayWidgetProvider.refreshAll(app)
         ReminderScheduler.reschedule(app)
         WidgetTicker.reschedule(app)
@@ -118,8 +162,9 @@ object TimetableRepository {
 
     /** 清空缓存后从 Prefs 重新载入 */
     fun reloadFromPrefs(context: Context) {
-        cached = TimetableJson.fromJson(Prefs.resultJson)
-        status = status.copy(sessionCount = cached.sessions.size)
+        rawParsed = TimetableJson.fromJson(Prefs.resultJson)
+        reloadUserCourses(context)          // 内部会 republish()
+        status = status.copy(sessionCount = rawParsed.sessions.size)
         notifyDataChanged(context)
     }
 
@@ -247,7 +292,9 @@ object TimetableRepository {
     }
 
     private fun commit(context: Context, parsed: ParseResult, html: String, message: String) {
-        cached = parsed
+        rawParsed = parsed
+        // 立刻重新拼装：同步回来的从来只有教务课表，自定义课程得原样留在课表上
+        republish()
         Prefs.resultJson = TimetableJson.toJson(parsed)
         Prefs.lastSyncAt = System.currentTimeMillis()
         Prefs.lastSyncMessage = message

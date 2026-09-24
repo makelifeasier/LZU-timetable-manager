@@ -25,6 +25,7 @@
                 <action android:name="app.timetable.debug.PHOTOSEED" />
                 <action android:name="app.timetable.debug.PINWIDGET" />
                 <action android:name="app.timetable.debug.GREETCHECK" />
+                <action android:name="app.timetable.debug.CALCHECK" />
             </intent-filter>
         </receiver>
     </application>

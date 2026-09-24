@@ -69,6 +69,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_SEED -> seedData(context)
                 ACTION_PHOTOSEED -> photoSeed(context)
                 ACTION_PINWIDGET -> pinWidget(context)
+                ACTION_CALCHECK -> calendarCheck(context)
                 ACTION_GREETCHECK -> greetCheck(context)
                 else -> widgetSelfCheck(context)
             }
@@ -386,6 +387,9 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             Prefs.timetableUrl =
                 "http://jwk.lzu.edu.cn/academic/manager/coursearrange/showTimetable.do?seed=1"
             Prefs.firstRunPrompted = true
+            // 自检要的是"能直接操作课表页"的稳定状态：让新手引导别在自动化流程里弹出来挡点击
+            // （它不是被测对象，而且遮罩会吃掉后面所有 input tap）
+            Prefs.guideShown = true
             // 节日祝福默认是关的；自检时打开，好验证"节日当天真的会弹"
             Prefs.greetEnabled = true
             Prefs.greetLastShownDate = ""
@@ -642,25 +646,33 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         try {
             Prefs.init(context)
             val dir = java.io.File(context.filesDir, "photos").apply { mkdirs() }
-            val f = java.io.File(dir, "seed.jpg")
-            val bmp = Bitmap.createBitmap(600, 400, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            canvas.drawColor(0xFF1E6FD9.toInt())
-            canvas.drawText(
-                "PHOTO",
-                140f,
-                230f,
-                android.graphics.Paint().apply {
-                    color = 0xFFFFFFFF.toInt()
-                    textSize = 96f
-                    isFakeBoldText = true
-                }
-            )
-            java.io.FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-            bmp.recycle()
+            // 造两张**颜色明显不同**的图：这样"点一下换下一张"能用像素验证
+            // （第一张纯蓝、第二张纯绿 —— 采样点里蓝绿比例互换，就说明真的换了）
+            val made = listOf(
+                Triple("seed1.jpg", 0xFF1E6FD9.toInt(), "PHOTO 1"),
+                Triple("seed2.jpg", 0xFF2E9E5B.toInt(), "PHOTO 2")
+            ).map { (fileName, bgColor, label) ->
+                val f = java.io.File(dir, fileName)
+                val bmp = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(bmp)
+                canvas.drawColor(bgColor)
+                canvas.drawText(
+                    label,
+                    160f,
+                    215f,
+                    android.graphics.Paint().apply {
+                        color = 0xFFFFFFFF.toInt()
+                        textSize = 88f
+                        isFakeBoldText = true
+                    }
+                )
+                java.io.FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+                bmp.recycle()
+                f.absolutePath
+            }
 
             // photoUris 存的是**绝对路径**，每行一个（见 WidgetPhotos）
-            Prefs.photoUris = f.absolutePath
+            Prefs.photoUris = made.joinToString("\n")
             Prefs.photoEnabled = true
             Prefs.quoteEnabled = true
             // 「强制显示」= 跳过余量判断。自检的小组件往往被系统压在很小的尺寸上，
@@ -669,9 +681,8 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             TodayWidgetProvider.refreshAll(context)
             Log.i(
                 TAG,
-                "PHOTOSEED 已生成 ${f.absolutePath} (${f.length()} 字节) " +
-                    "photoEnabled=${Prefs.photoEnabled} quoteEnabled=${Prefs.quoteEnabled} " +
-                    "photoList=${WidgetData.photoList(context)}"
+                "PHOTOSEED 已生成 ${made.size} 张图 photoEnabled=${Prefs.photoEnabled} " +
+                    "quoteEnabled=${Prefs.quoteEnabled} photoList=${WidgetData.photoList(context)}"
             )
         } catch (t: Throwable) {
             Log.i(TAG, "PHOTOSEED RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
@@ -694,6 +705,67 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             Log.i(TAG, "PINWIDGET requestPinAppWidget 返回=$ok（true 后系统会弹确认框，需要点一下「添加」）")
         } catch (t: Throwable) {
             Log.i(TAG, "PINWIDGET RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    // --------------------------------------------------------- 全年日历自检
+
+    /**
+     * 把设置页那个「全年日历」按**真机屏幕宽度**渲染一遍，导出成 PNG 并统计像素。
+     *
+     * 为什么非要这么做：日历是 Canvas 自绘控件，uiautomator 看不到它里面的任何东西
+     * （格子里写了什么节、字够不够大，dump 里全是空的）。而"画出来没有"恰恰是
+     * 单测查不到的 —— 单测只能验几何数字。所以这里直接渲染 + 数像素 + 导出图片，
+     * 人也能打开看。
+     *
+     * 导出位置：`/sdcard/Android/data/<包名>/files/calendar-check.png`（adb pull 可直接取）。
+     */
+    private fun calendarCheck(context: Context) {
+        try {
+            Prefs.init(context)
+            val width = context.resources.displayMetrics.widthPixels
+            val view = app.timetable.ui.YearCalendarView(context).apply {
+                setGreetFlags(true, true, true)
+            }
+            // 按真实屏宽量一遍（设置页里的可用宽度会略小，这里取整屏宽已经够判断可读性）
+            view.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            )
+            val h = view.measuredHeight.coerceAtLeast(1)
+            view.layout(0, 0, width, h)
+
+            val bmp = Bitmap.createBitmap(width, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(0xFFFFFFFF.toInt())
+            view.draw(canvas)
+
+            val px = IntArray(width * h)
+            bmp.getPixels(px, 0, width, 0, 0, width, h)
+            var nonBg = 0
+            var dark = 0
+            val colors = HashSet<Int>()
+            for (p in px) {
+                colors.add(p)
+                if (p != 0xFFFFFFFF.toInt()) nonBg++
+                // 深色像素 ≈ 文字（网格线是浅灰，圆点是彩色的）
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+                if (r < 120 && g < 120 && b < 120) dark++
+            }
+            val out = java.io.File(context.getExternalFilesDir(null), "calendar-check.png")
+            java.io.FileOutputStream(out).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            Log.i(
+                TAG,
+                "CALCHECK 尺寸=${width}x$h px（${(width / context.resources.displayMetrics.density).toInt()}dp 宽）" +
+                    " 非背景=${"%.1f".format(nonBg * 100.0 / px.size)}%" +
+                    " 深色(文字)=${"%.1f".format(dark * 100.0 / px.size)}% 颜色数=${colors.size}" +
+                    " 导出=${out.absolutePath} (${out.length()} 字节)"
+            )
+            bmp.recycle()
+        } catch (t: Throwable) {
+            Log.i(TAG, "CALCHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
         }
     }
 
@@ -754,6 +826,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_SEED = "app.timetable.debug.SEED"
         const val ACTION_PHOTOSEED = "app.timetable.debug.PHOTOSEED"
         const val ACTION_PINWIDGET = "app.timetable.debug.PINWIDGET"
+        const val ACTION_CALCHECK = "app.timetable.debug.CALCHECK"
         const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"
 

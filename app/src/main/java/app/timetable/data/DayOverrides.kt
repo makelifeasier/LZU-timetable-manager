@@ -14,20 +14,47 @@ import java.time.LocalDate
  * 设计取舍（很重要）：
  *  - **REPLACE 只存"引用第几周"**，不复制整份课表：数据小，而且下学期重新导入后自动跟随新数据；
  *  - **ADD 才存那一节的字段**（课名/教室/节次），因为那是凭空加出来的，没有来源可引用；
+ *  - **LIST 存"这一天完整的课表"**：给"点某一节课、单独改掉/删掉它"用（语义见 [Mode.LIST]）。
  *  - 键是**日期**（`2026-10-08`）而不是"第几周星期几"：这样跨周后旧覆盖自然不生效，
  *    也不会因为用户手动切周次而串味。
  */
 internal object DayOverrides {
 
-    enum class Mode { REPLACE, CLEAR, ADD }
+    /**
+     * 覆盖的四种形态。
+     *
+     * [LIST] 是"整份列表"：这一天的课表**完全**由 [Override.extra] 给出 ——
+     * "点某一节课、单独改掉或删掉它"就是这么记的。ADD 不行（它是在原课之上再加，
+     * 盖不住原来那节），REPLACE 也不行（它只存"换成第几周的那一天"，装不下任意列表）。
+     *
+     * 它一度搭在 CLEAR 上（当时 `ui/DayEditDialog` 对 mode 用的是**穷尽 when**，
+     * 多一个枚举值那个文件立刻编不过）；那个 when 后来改成了带 else 的分支，
+     * 于是这里补成真正的枚举值。**解析时仍然认老的 `CLEAR + "l": true`**，
+     * 免得同一台设备上早先版本写下的覆盖读不回来（见 [parse]）。
+     */
+    enum class Mode { REPLACE, CLEAR, ADD, LIST }
 
     data class Override(
         val mode: Mode,
         /** 只在 REPLACE 时有意义：引用第几周的同一星期几 */
         val sourceWeek: Int = 0,
-        /** 只在 ADD 时有意义：手动加的那几节 */
+        /** ADD / LIST 时有意义：手动加的那几节；LIST 时是**整份**课表 */
         val extra: List<Session> = emptyList()
-    )
+    ) {
+        /**
+         * 是不是「整份列表」模式：这一天的课表完全由 [extra] 给出，不看 base、也不与它合并。
+         *
+         * 为什么由 [mode] 推导而不是单独存一个布尔字段：两者一旦能不一致，就会出现
+         * "说好了整份替换、结果又把原来的课并了进来"这种最难查的错。
+         * 保留这个只读属性纯粹是让调用方读起来直白（仓库、DayEditDialog 都是读它）。
+         */
+        val isList: Boolean get() = mode == Mode.LIST
+
+        companion object {
+            /** 「这一天的课表就是这几段」的覆盖。语义见 [Mode.LIST] 与 [isList] */
+            fun list(extra: List<Session>): Override = Override(Mode.LIST, extra = extra)
+        }
+    }
 
     // ------------------------------------------------------------- 纯逻辑（可单测）
 
@@ -37,15 +64,34 @@ internal object DayOverrides {
      * @param base 该日期"本来"的课（由星期 + 周次算出来）
      * @param day  星期几（1..7），ADD 的课需要
      */
-    fun apply(base: List<Session>, o: Override?, day: Int = 1): List<Session> = when (o?.mode) {
-        null -> base
+    fun apply(base: List<Session>, o: Override?, day: Int = 1): List<Session> = when {
+        o == null -> base
+
+        // 列表模式：这一天就是 extra 里的这几段，与 base 无关（不叠加、不合并）。
+        // day 一律改写成被覆盖的那一天 —— 存进去的 day 只是记录，
+        // 不该盖过"这个覆盖挂在哪个日期上"这个事实（与 ADD 的归一化口径一致）。
+        o.isList -> o.extra.map { it.copy(day = day) }
+
         // REPLACE 的"换成哪一周"只有仓库知道（它才拿得到课表和周次基准），
         // 所以这里**原样返回**：万一将来有调用方误用这个函数，看到的也是"没改过"，
         // 而不是原来的"返回空表"——那会把用户的"替换"静默变成"停课"。
-        Mode.REPLACE -> base
-        Mode.CLEAR -> emptyList()
-        Mode.ADD -> mergeSorted(base, o.extra, day)
+        o.mode == Mode.REPLACE -> base
+
+        o.mode == Mode.CLEAR -> emptyList()
+        else -> mergeSorted(base, o.extra, day)
     }
+
+    /**
+     * 列表模式在**显示层**的样子：这一天的课 = extra，排序并合并相邻节次。
+     *
+     * 仓库 `TimetableRepository.sessionsOn` 直接调它 —— 所以"列表模式进来之后到底长什么样"
+     * 这件事本身是可单测的（sessionsOn 要 Context，测不了；这里把它的那一步抽出来）。
+     * 仍然要合并的原因：extra 是"当时界面上看得见的那几段"，
+     * 相邻的两段同一门课（第3节 + 第4节）在课表上应该是「第3-4节」一张卡片，
+     * 与没有调课时 `WeekCalc.merge` 的表现保持一致。
+     */
+    fun listFor(o: Override, day: Int): List<Session> =
+        WeekCalc.merge(o.extra.map { it.copy(day = day) })
 
     /** ADD：把额外课并进原课表，按起始节排序、同节去重（同一节被加了两次只留一个） */
     fun mergeSorted(base: List<Session>, extra: List<Session>, day: Int): List<Session> {
@@ -75,11 +121,15 @@ internal object DayOverrides {
                     "REPLACE" -> Mode.REPLACE
                     "CLEAR" -> Mode.CLEAR
                     "ADD" -> Mode.ADD
+                    "LIST" -> Mode.LIST
                     else -> continue
                 }
                 val extra = ArrayList<Session>()
                 item.optJSONArray("x")?.let { arr -> extra.addAll(readSessions(arr)) }
-                out[date] = Override(mode, item.optInt("w", 0), extra)
+                // 兼容：整份列表最早是记成 CLEAR + "l": true 的，读到就归一化成 LIST。
+                // 不兼容的话，同一台设备上早先版本存下的"改过的那几节"会读成"当天课全没了"。
+                val normalized = if (item.optBoolean("l", false)) Mode.LIST else mode
+                out[date] = Override(normalized, item.optInt("w", 0), extra)
             }
         }
         return out
@@ -107,7 +157,9 @@ internal object DayOverrides {
             val item = JSONObject()
             item.put("m", o.mode.name)
             if (o.mode == Mode.REPLACE) item.put("w", o.sourceWeek)
-            if (o.mode == Mode.ADD && o.extra.isNotEmpty()) {
+            // LIST 的 extra 就算是空的也不影响：此时只写 m=LIST，读回来就是"这一天没课"，
+            // 与"没调过"（键不存在）分得清清楚楚。
+            if ((o.mode == Mode.ADD || o.isList) && o.extra.isNotEmpty()) {
                 val arr = JSONArray()
                 for (s in o.extra) {
                     arr.put(

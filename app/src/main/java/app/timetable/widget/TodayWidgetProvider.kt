@@ -7,6 +7,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
@@ -19,13 +20,19 @@ import app.timetable.data.WeekCalc
 import app.timetable.reminder.WidgetTicker
 
 /**
- * 桌面小组件：可上下滑动的课程列表，右上角一个图标按钮切换两种模式。
+ * 桌面小组件：可上下滑动的课程列表 + 底部「每日一句 / 图片」扩展区，
+ * 右上角两个按钮分别切模式（接下来 / 整天）与刷新。
  *
  *  - **接下来**：正在上 + 接下来要上的（跨天）
  *  - **整天**：今天全部课，从早到晚
  *
  * 两种模式都在右侧显示**起止时间**。列表用 ListView + [TimetableWidgetService]，
  * 这是安卓上做可滚动小组件的唯一正路。
+ *
+ * 图片区（[WidgetExtras]）是**普通 ImageView**：点一下换下一张（[ACTION_NEXT_PHOTO]）。
+ * 曾经用 `AdapterViewFlipper` 自动轮播，但它会吃掉竖直手势、让课程列表滑不动
+ * （用户："自动轮播启动后小组件无法使用"），那条路已整条删除；
+ * 自动换图改由 [PhotoAutoAdvance] 用非唤醒闹钟定时重画图片那一个控件。
  *
  * 刻意**不再提示「登录已过期」**：缓存数据照样能看，反复弹提示只会烦人。
  */
@@ -83,6 +90,50 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 }
                 refreshAll(context)
             }
+
+            // 点图片：换下一张。老实现是 AdapterViewFlipper 自己翻页（用户："开了轮播小组件就没法用"），
+            // 那条路已经删掉了，现在换图只有这一个入口 —— 点一下。
+            ACTION_NEXT_PHOTO -> nextPhoto(context, partial = false)
+
+            // 自动换图（我们自己排的非唤醒闹钟，见 PhotoAutoAdvance）
+            PhotoAutoAdvance.ACTION_PHOTO_ALARM -> nextPhoto(context, partial = true)
+        }
+    }
+
+    /** 最后一个组件被移除：把自动换图的闹钟也撤掉，别让它在没人看的时候继续排 */
+    override fun onDisabled(context: Context) {
+        PhotoAutoAdvance.cancel(context)
+    }
+
+    /**
+     * 换到下一张图并重画。
+     *
+     * @param partial true = 自动换图那条路：只把图片那一个 ImageView 换掉
+     *   （[PhotoAutoAdvance.repaintPhoto]）。整块重画会重新 setRemoteAdapter，列表滚动位置
+     *   可能被顶回顶部 —— 每隔几秒来一次，用户就又要说"组件没法用"了。
+     *   false = 用户点的：**必须**整块重画（和"刷新"按钮同一条路径），"点了就变"比省那几毫秒重要。
+     *
+     * 无论哪条路，下标都会先推进（[PhotoCursor.next]），所以即使局部刷新失败退化成整块重画，
+     * 显示的也是新的一张。
+     */
+    private fun nextPhoto(context: Context, partial: Boolean) {
+        val photos = WidgetData.photoList(context)
+        // 没有图片（被删光/清空）时没什么可换的：只记一行日志。图片区这时本来就是隐藏的，
+        // 点不到；能走到这里的只有"闹钟到点了但图刚被删"这种空档期。
+        if (photos.isEmpty()) {
+            Log.i(TAG, "换图请求被忽略：当前没有任何图片")
+            return
+        }
+        val at = PhotoCursor.next(context, photos.size)
+        Log.i(
+            TAG,
+            "换图 → 第 ${at + 1}/${photos.size} 张（${if (partial) "自动" else "点击"}）"
+        )
+        if (partial && PhotoAutoAdvance.repaintPhoto(context, at)) {
+            // 一次性闹钟：触发过就没了，这里排下一次（条件不满足时会顺手撤掉）
+            PhotoAutoAdvance.sync(context)
+        } else {
+            updateViews(context)
         }
     }
 
@@ -90,7 +141,12 @@ class TodayWidgetProvider : AppWidgetProvider() {
         const val ACTION_REFRESH = "app.timetable.action.WIDGET_REFRESH"
         const val ACTION_TICK = "app.timetable.action.WIDGET_TICK"
         const val ACTION_TOGGLE_MODE = "app.timetable.action.WIDGET_TOGGLE_MODE"
+
+        /** 点图片区 → 换下一张（[WidgetExtras] 里挂到 widget_photo_area 上） */
+        const val ACTION_NEXT_PHOTO = "app.timetable.action.WIDGET_NEXT_PHOTO"
         const val EXTRA_COURSE = "course"
+
+        private const val TAG = "WidgetPhoto"
 
         /**
          * 每行高度与头部/边距的换算统一放在 WidgetData 里（provider 与列表工厂共用），
@@ -105,6 +161,20 @@ class TodayWidgetProvider : AppWidgetProvider() {
             if (ids.isEmpty()) return
             for (id in ids) runCatching { mgr.updateAppWidget(id, build(app, id)) }
             runCatching { mgr.notifyAppWidgetViewDataChanged(ids, R.id.widget_list) }
+        }
+
+        /**
+         * 只重画外观，**不**通知列表重新取数。
+         *
+         * 换图（点击、自动）走这条路：课程数据一个字都没变，没有理由让列表服务重跑一遍 ——
+         * 那一次往返除了慢，还可能把用户的滚动位置顶回顶部。
+         */
+        fun updateViews(context: Context) {
+            val app = context.applicationContext
+            val mgr = AppWidgetManager.getInstance(app) ?: return
+            val ids = mgr.getAppWidgetIds(ComponentName(app, TodayWidgetProvider::class.java))
+            if (ids.isEmpty()) return
+            for (id in ids) runCatching { mgr.updateAppWidget(id, build(app, id)) }
         }
 
         fun build(context: Context, widgetId: Int): RemoteViews {
@@ -160,8 +230,12 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 broadcast(context, 2, ACTION_TOGGLE_MODE)
             )
 
-            // 列表下方的扩展区：每日一句 / 图片轮播（开关默认关闭，见 WidgetExtras）
-            WidgetExtras.apply(context, views, openApp)
+            // 列表下方的扩展区：每日一句 / 图片（开关默认关闭，见 WidgetExtras）。
+            // 图片区整块可点 → **换下一张**：这里用广播而不是"打开 App" ——
+            // 用户点的是那张图，只想看下一张，不该被拽进 App。
+            // （requestCode 3 是这一条专用的：PendingIntent 的身份由 (requestCode, Intent) 决定，
+            //  与刷新/模式/闹钟分开，才不会互相覆盖或取消。）
+            WidgetExtras.apply(context, views, broadcast(context, 3, ACTION_NEXT_PHOTO))
 
             val status = TimetableRepository.status
             val result = TimetableRepository.result()
