@@ -71,6 +71,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_CALCHECK -> calendarCheck(context)
                 ACTION_CROPCHECK -> cropCheck(context)
+                ACTION_WIDGETSHOT -> widgetShot(context, intent.getIntExtra(EXTRA_HEIGHT, 0))
                 ACTION_GREETCHECK -> greetCheck(context)
                 else -> widgetSelfCheck(context)
             }
@@ -812,6 +813,76 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         }
     }
 
+    // --------------------------------------------------------- 小组件出图自检
+
+    /**
+     * 把小组件**真的画成一张位图**并导出，同时读回图片框四角的像素。
+     *
+     * 为什么必须这么验：圆角遮罩是在位图上画的（`PhotoBitmap.maskCorners`），
+     * 而单测里 `Canvas`/`Path` 全是假实现、`Path.op` 甚至返回 false ——
+     * "遮罩到底画上去了没有"单测**根本测不了**。这里走的是生产同一条 inflate/measure/draw 链路，
+     * 导出的图人也能直接打开看。
+     *
+     * 导出位置：`/sdcard/Android/data/<包名>/files/widget-shot.png`
+     */
+    private fun widgetShot(context: Context, forcedH: Int) {
+        try {
+            Prefs.init(context)
+            TimetableRepository.init(context)
+            if (forcedH > 0) WidgetData.debugHeightOverrideDp = forcedH
+            try {
+                val views = TodayWidgetProvider.build(context, AppWidgetManager.INVALID_APPWIDGET_ID)
+                val root = views.apply(context, null)
+                root.measure(
+                    View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(2400, View.MeasureSpec.AT_MOST)
+                )
+                root.layout(0, 0, root.measuredWidth, root.measuredHeight)
+
+                val w = root.measuredWidth.coerceAtLeast(1)
+                val h = root.measuredHeight.coerceAtLeast(1)
+                val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                root.draw(Canvas(bmp))
+
+                // 图片框的位置与四角像素
+                val area = root.findViewById<View>(R.id.widget_photo_area)
+                val info = if (area != null && area.visibility == View.VISIBLE && area.width > 0) {
+                    // 往内缩 2px：圆角边缘本身是抗锯齿的，踩在弧线上取样会得到中间色
+                    val inset = 2
+                    val c = listOf(
+                        "左上" to intArrayOf(area.left + inset, area.top + inset),
+                        "右上" to intArrayOf(area.right - inset, area.top + inset),
+                        "左下" to intArrayOf(area.left + inset, area.bottom - inset),
+                        "右下" to intArrayOf(area.right - inset, area.bottom - inset),
+                        "正中" to intArrayOf(area.left + area.width / 2, area.top + area.height / 2)
+                    ).joinToString(" ") { (name, xy) ->
+                        val p = bmp.getPixel(
+                            xy[0].coerceIn(0, w - 1),
+                            xy[1].coerceIn(0, h - 1)
+                        )
+                        "$name=#%08X".format(p)
+                    }
+                    "图片框=[${area.left},${area.top}][${area.right},${area.bottom}] $c"
+                } else {
+                    "图片框=不可见"
+                }
+
+                val out = java.io.File(context.getExternalFilesDir(null), "widget-shot.png")
+                java.io.FileOutputStream(out).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                bmp.recycle()
+                Log.i(
+                    TAG,
+                    "WIDGETSHOT ${w}x$h px 高度=${if (forcedH > 0) "${forcedH}dp(强制)" else "自然"} " +
+                        "导出=${out.absolutePath}(${out.length()} 字节) $info"
+                )
+            } finally {
+                WidgetData.debugHeightOverrideDp = 0
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "WIDGETSHOT RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
     // --------------------------------------------------------- 明文策略自检
 
     private fun probeCleartext(context: Context, url: String) {
@@ -871,6 +942,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_PINWIDGET = "app.timetable.debug.PINWIDGET"
         const val ACTION_CALCHECK = "app.timetable.debug.CALCHECK"
         const val ACTION_CROPCHECK = "app.timetable.debug.CROPCHECK"
+        const val ACTION_WIDGETSHOT = "app.timetable.debug.WIDGETSHOT"
         const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"
 

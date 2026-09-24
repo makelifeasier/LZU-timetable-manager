@@ -21,16 +21,22 @@ import java.io.File
  *    `AdapterViewFlipper`：它是个可滚动的 AdapterView，会吃掉竖直手势，
  *    课程列表就滑不动了（"自动轮播启动后小组件无法使用"）。现在图片区永远是同一个
  *    ImageView，**点一下换下一张**（[TodayWidgetProvider.ACTION_NEXT_PHOTO]）。
- * 2. **图片框高度不再由"列表下方剩多少"决定**，而是由**照片自己的比例**决定
- *    （[WidgetData.photoWantedHeightDp]）：框刚好装下照片，多出来的高度交给课程列表
- *    （多显示几整行课）。老做法是"剩多少就用多少"（[WidgetData.photoBoxTargetDp]），
- *    结果下拉组件时照片比例没变、框却变高 → 照片完整显示 + 上下各留一大段空白
- *    （真机日志里的"留边=74px(28%)"）。那段账写在 [WidgetData.photoWantedHeightDp] 里，别改回去。
- * 3. **位图不再交给宿主缩放或裁剪**：解码尺寸就是框的像素尺寸（[PhotoBitmap.targetPx]）。
+ * 2. **图片框高度 = 列表下方剩下的全部空间**（[ExtrasPlanner] 的结论），于是底部不留空白。
+ *    中间的两次反复值得记下来：
+ *     · 最早是"剩多少就用多少"→ 框比照片高、照片完整显示，上下各一大段留白；
+ *     · 上一轮改成"框高 = 照片需要的高"、多出来的高度还给课程列表 → 方向对，但**课程行只能整行加**，
+ *       加到不能再加之后那条不足一整行的零头（真机 24dp）还是留在底部，用户反馈"下拉之后依然有空白"；
+ *     · 现在是"行数先按整行定死（底部不许切半行），剩下的**全部**归图片框"，照片按
+ *       [PhotoFit.layout] 的规则**居中取一块填满**：比例一致（用户导入时裁的那条框与组件同形）
+ *       就是整张原样显示，比例不一致才裁一点 —— 用户原话："比留一条空白好看，也比拉伸好"。
+ *    判据是日志里的 `底部零头=0dp` 与 `留边=0px(0%)` 两列。
+ * 3. **位图不再交给宿主缩放或裁剪**：解码尺寸就是框的像素尺寸（[PhotoBitmap.targetPx]），
+ *    四个角也在位图里做好圆角遮罩（[PhotoBitmap.maskCorners]）—— 容器是圆角 drawable，
+ *    照片的直角压在上面就是用户说的"直角紧贴圆角，很突兀"。
  * 4. 上一轮加过"显示方式 / 裁哪一段 / 放大倍数"三个用户开关。用户否掉了：
  *    「我不是要你有显示倍率，而是导入图片的时候可以自己裁剪」。于是这一轮改成：
  *    **用户在图库导入时自己裁一次**（`ui/PhotoCropDialog.kt`），**程序只按空间决定怎么放**
- *    （[PhotoFit.layout]：放得下 → 整张完整显示；放不下 → 在这张裁剪图里居中取一块）。
+ *    （[PhotoFit.layout]：比例一致 → 整张完整显示；不一致 → 居中取一块填满）。
  *    三个偏好键从此不再被读取（说明写在 `widget/PhotoDisplayMode.kt` 里：
  *    那个文件现在只剩三个常量的空壳，只为一处编译保留，没有任何读写路径）。
  *
@@ -38,7 +44,8 @@ import java.io.File
  *
  * 这一段出问题在真机上极难定位（只有一张图 / 一张坏图 / 宿主不支持某个 RemoteViews 方法），
  * 所以每次刷新都打一行：显示了几张、余量多少、**框多大多少比例、裁剪框多少比例、
- * 走的是哪条分支（完整显示 / 取中间块）、位图多少像素多少字节、什么格式、set 成功没有**。
+ * 走的是哪条分支（完整显示 / 取中间块）、位图多少像素多少字节、什么格式、set 成功没有、
+ * 四个角的圆角半径与填色、底部还剩几 dp**。
  * "我在真机上看不到画面"的时候，这一行就是唯一判据。
  */
 internal object WidgetExtras {
@@ -69,11 +76,12 @@ internal object WidgetExtras {
             photoEnabled = Prefs.photoEnabled,
             photoCount = photos(context).size,
             availableDp = space,
-            // 这里给的是"**照片需要**多高"（比例 × 内容宽度，夹在 56..150dp），
-            // 而不是"这次框能有多高"。后者正是本次要修的病：框跟着剩余空间长高，
-            // 而照片比例没变 → 放得下 → 上下各留一大段空白（真机日志里的"留边=74px(28%)"）。
-            // 参数里的 space 现在不参与计算（见 photoBoxTargetDp 的注释），
-            // 传进来只是为了在调用点保留"它以前是按余量算的"这条线索。
+            // 这里给的是"**照片需要**多高"（比例 × 内容宽度，夹在 56..150dp），用来决定
+            // **排行数时要给图片留多少**（[WidgetData.photoReserveDp] 是同一个数）。
+            // 自动档的**框高不取这个值**：框吃掉列表下方的全部剩余空间 —— 只要格子装得下
+            // "预留 + 一整行课"（≥187dp 那档），框高就 ≥ 它，照片不会被压到"需要的高度"以下；
+            // 只有最矮的格子（150dp）会被压扁，那时走"居中取一块"。
+            // 它只在强制显示档里直接当框高用（那个档位故意不听余量）。
             wantedPhotoDp = WidgetData.photoBoxTargetDp(space, contentDp, aspect)
         )
     }
@@ -118,8 +126,9 @@ internal object WidgetExtras {
                 PhotoCursor.remember(context, at)
 
                 // 高度只能用 setViewLayoutHeight 表达（布局里图片框是 0dp，位置与顺序由布局定）。
-                // 这个值 = 照片需要的高（空间不够时由 ExtrasPlanner 降到可用高度）——
-                // **不是**"列表下方剩多少"。后者会让框比照片高，多出来的部分就是上下留白。
+                // 这个值 = **列表下方剩下的全部空间 − 6dp 上边距**（[ExtrasPlanner] 的结论）：
+                // 课程行数已经按整行定死，剩下的零头全归图片框，于是组件底部不再漏空白。
+                // 照片不会因此变形或被拉伸 —— 比例不一致时走"居中取一块填满"（[PhotoFit.layout]）。
                 runCatching {
                     views.setViewLayoutHeight(
                         R.id.widget_photo_area,
@@ -142,9 +151,9 @@ internal object WidgetExtras {
                     views.setImageViewBitmap(R.id.widget_photo_image, render.bitmap)
                 }
                 // 这一行是"真机核对"用的唯一判据（用户看不到画面，只能拿截图取像素对数字）：
-                //   框=226x72dp 照片比例=3.14:1 需要的框高=72dp 留边=0px 行数=2 ...
-                // `框` 与 `需要的框高` 相等 = 框刚好装下照片（零留边）；`框` 更大 = 又回到了
-                // "框高由剩余空间定"的老病（下拉组件时下边一大片空白），见 WidgetData.photoWantedHeightDp。
+                //   框=226x72dp 照片比例=3.14:1 需要的框高=72dp 留边=0px 行数=2 底部零头=0dp ...
+                // 两条不变量：`留边=0px(0%)`（照片区里一条留白都没有）、`底部零头=0dp`
+                // （图片框下方的组件底部也没有留白）。哪一列不对，就去查它对应的规则是不是被改回去了。
                 Log.i(
                     TAG,
                     "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 " +
@@ -153,10 +162,12 @@ internal object WidgetExtras {
                             frame = frame,
                             boxWidthDp = contentDp,
                             boxHeightDp = plan.photoHeightDp,
-                            // "需要的框高"必须按**决定框高的那个比例**（第一张）算，
-                            // 不能按当前显示这张算 —— 否则日志里的不变量自己就破了
+                            // "需要的框高"必须按**决定裁剪框的那个比例**（第一张）算，
+                            // 不能按当前显示这张算 —— 否则日志里的两列自己就对不上号了
                             wantedHeightDp = WidgetData.photoWantedHeightDp(context),
-                            rows = WidgetData.visibleRows(context)
+                            rows = WidgetData.visibleRows(context),
+                            // 底部零头（用户说的"空白"）由这份计划自己算出来：自动档恒为 0
+                            leftoverDp = ExtrasPlanner.leftoverBelowBoxDp(plan)
                         ) +
                         " set=${if (set.isSuccess) "ok" else "FAIL:${set.exceptionOrNull()?.javaClass?.simpleName}"}"
                 )

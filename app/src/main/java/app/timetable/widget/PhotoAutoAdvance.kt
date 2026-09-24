@@ -138,7 +138,10 @@ internal object PhotoAutoAdvance {
     fun repaintPhoto(context: Context, index: Int): Boolean {
         val app = context.applicationContext
         val mgr = AppWidgetManager.getInstance(app) ?: return false
-        val boxDp = photoBoxDp(app)
+        // 用整份计划（而不是只有框高）：日志里的"底部零头"要靠它里面的 `quoteVisible` 才算得出来，
+        // 而这一列正是"自动换图这一轮有没有把组件底部留白"的判据
+        val plan = WidgetExtras.plan(app)
+        val boxDp = plan.photoHeightDp
         if (boxDp <= 0) return false
 
         val contentDp = WidgetData.contentWidthDp(app)
@@ -186,7 +189,10 @@ internal object PhotoAutoAdvance {
                         boxWidthDp = contentDp,
                         boxHeightDp = boxDp,
                         wantedHeightDp = WidgetData.photoWantedHeightDp(app),
-                        rows = WidgetData.visibleRows(app)
+                        rows = WidgetData.visibleRows(app),
+                        // 底部零头由这份计划自己算（它里面存着算这份计划时用的那个余量）：
+                        // 自动档恒为 0，非 0 就说明"框吃掉零头"那条规则被人改回去了
+                        leftoverDp = ExtrasPlanner.leftoverBelowBoxDp(plan)
                     ) +
                     " set=ok(partial)"
             )

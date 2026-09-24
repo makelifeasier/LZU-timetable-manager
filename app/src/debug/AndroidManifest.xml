@@ -27,6 +27,7 @@
                 <action android:name="app.timetable.debug.GREETCHECK" />
                 <action android:name="app.timetable.debug.CALCHECK" />
                 <action android:name="app.timetable.debug.CROPCHECK" />
+                <action android:name="app.timetable.debug.WIDGETSHOT" />
             </intent-filter>
         </receiver>
     </application>

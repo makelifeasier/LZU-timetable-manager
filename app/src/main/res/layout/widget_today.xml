@@ -78,8 +78,8 @@
       这样不会出现被切掉一半的第三行。这里的 94dp = 2 行，只是取不到尺寸时的兜底。
 
       图片开着时，行数是**先扣掉图片预留高度**再算的（WidgetData.rowsFor / photoReserveDp）：
-      于是同一档高度里拖动组件，行数不变、多出来的高度归图片。这是用户要的
-      "课程数固定、向下拉图片出现在下侧"，而不是"向下拉又多一行课"。
+      于是同一档高度里拖动组件，行数在一整行之内不变。而排完整行之后剩下的高度（含那条不足
+      一整行的零头）**全部归图片框**（ExtrasPlanner.plan）—— 组件底部因此不会留白。
     -->
     <ListView
         android:id="@+id/widget_list"
@@ -135,8 +135,9 @@
 
     <!--
       图片框：一个 FrameLayout 包一个 ImageView。
-        · 高度由代码按「列表下方真实剩下的高度」用 setViewLayoutHeight 设置
-          （见 WidgetData.photoBoxTargetDp / WidgetExtras.apply）；
+        · 高度由代码按「列表下方**剩下的全部空间** − 6dp 上边距」用 setViewLayoutHeight 设置
+          （见 ExtrasPlanner.plan / WidgetExtras.apply）：课程行数先按整行定死，剩下的零头归框，
+          所以组件底部不会漏出一条空白（判据：日志里的 `底部零头=0dp`）；
         · **整块（这个 FrameLayout）都可点** → 换下一张（Provider 的 ACTION_NEXT_PHOTO 广播）。
           点挂在这一层而不是里面的 ImageView：ImageView 默认不消费点击，事件照样落到这里，
           所以"图还没解出来/留白"时点上去也有反应；这块的高度就等于图片的高度，
@@ -147,18 +148,19 @@
       真机反馈"自动轮播启动后小组件无法使用"就是它。现在自动换图改由 PhotoAutoAdvance
       定时局部重画这一个 ImageView，整块布局里没有任何会吃手势的轮播控件。
 
-      ## scaleType="fitCenter" 是**两条渲染分支的安全默认值**，不是随便选的
+      ## scaleType="fitCenter" 是恒等变换，不是随便选的
 
-      代码用 PhotoFit.layout 产出两种位图，两种都满足"宽度逐像素等于框宽、高度 ≤ 框高"：
+      代码用 PhotoFit.layout 产出的位图**逐值等于这块框的像素尺寸**（填满、零留边）：
 
-        · 放得下（完整显示）：位图 = 框宽 × 按图自身比例算出的高（≤ 框高）→
-          fitCenter 的缩放因子 = min(1, 框高/位图高) = 1，只做居中，一个像素都不裁、不缩放，
-          多出来的上下部分就是**这块 FrameLayout 自己的圆角背景**（留边不会变成黑边）；
-        · 放不下（取裁剪图的中间一块）：位图 = 框的像素尺寸 → fitCenter 是恒等变换。
+        · 比例一致（用户按裁剪框裁出来的照片）→ 取到的窗口就是整张源图 → 整张原样显示；
+        · 比例不一致（后来拉高/压扁过组件）→ 在源图内部居中取一块，缩到框的像素尺寸。
 
-      以前这里写的是 centerCrop（配"填满"模式）。centerCrop 在第一种情况下会把
-      "已经完整显示的图"重新放大到铺满、把左右裁掉 —— 那正是用户抱怨的"显示不全"。
-      换掉之后，宿主端不再需要任何 setInt("setScaleType")，渲染结果只由我们自己产出的位图决定。
+      两种产出的宽高都等于框，所以 fitCenter 既不缩放也不裁剪（centerCrop 同样是恒等变换，
+      但 fitCenter 是更弱的假设：万一哪天位图比框小了一点，centerCrop 会放大着裁，更容易看出问题）。
+      宿主端因此不需要任何 setInt("setScaleType")，渲染结果只由我们自己产出的位图决定。
+
+      照片的**四个圆角**也是在位图里做好的（PhotoBitmap.maskCorners，半径读的就是这块背景 drawable
+      的 <corners>）—— 否则照片的直角会压在这块圆角背景上，就是用户说的"直角紧贴圆角，很突兀"。
     -->
     <FrameLayout
         android:id="@+id/widget_photo_area"

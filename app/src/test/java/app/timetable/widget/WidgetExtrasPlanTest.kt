@@ -1,4 +1,4 @@
-﻿package app.timetable.widget
+package app.timetable.widget
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,13 +15,16 @@ import java.io.File
  *    放得下就都显示（句子在上、图片在下），放不下才退让。
  *  - **退让顺序**：先保图片（用户主动挑的、信息量大），句子是装饰；
  *    但连图片的硬底线（32dp）都占不下时反过来只留句子（一句话只要 22dp）。
- *  - **图片框高度按内容宽度算，且只由宽度定**（16:9）：老算法按组件高度在 0.72 / 1.15 之间跳，
- *    同一个框换个高度就换个比例，`centerCrop` 于是每次都裁在别处 ——
- *    真机反馈"显示窗口和图片大小对不上"就是这么来的。
- *  - **行数先把图片预留扣掉**（`rowsFor(..., reserveDp)`）：这样"向下拉组件"多出来的高度
- *    归图片、行数在一档高度内不变，而不是又挤出一行课（用户原话第 3 条）。
- *    整条链路的数字在 [reservingThePhotoKeepsTheRowCountFixedWithinOneRowSlot] 里逐值钉死。
- *  - **框的高度就是解码尺寸**：框和图永远同比例，既不会拉伸也不会露缝。
+ *  - **图片框高度 = 列表下方剩下的全部空间**（− 6dp 上边距）：本轮的核心。
+ *    行数先按整行定死（[WidgetData.photoRowsFor]），剩下的**全部**（含那条不足一整行的零头）
+ *    都归图片框 —— 于是底部零头恒为 0（判据 [ExtrasPlanner.leftoverBelowBoxDp]）。
+ *    照片"想要"多高（[WidgetData.photoWantedHeightDp]）只用来决定排行数时的预留，
+ *    以及在强制显示档里当框高用。
+ *  - **比例一致 → 整张；不一致 → 居中取一块填满**：框高由空间决定之后，框与照片的比例不一定相等，
+ *    这一档由 [PhotoFit.layout] 统一处理（绝不拉伸、绝不留白）。
+ *  - **行数先把图片预留扣掉**（`rowsFor(..., reserveDp)`）：这样"向下拉组件"时多出来的高度
+ *    先变成整行课（一档高度内行数不变），最后那点零头才归图片框。
+ *  - **框的高度就是解码尺寸**：位图逐值等于框 → 宿主端 fitCenter 是恒等变换。
  *
  * 只测纯函数：单测里 Android API 全是"返回默认值"的假实现
  * （`testOptions.unitTests.isReturnDefaultValues = true`），碰 Context 的代码一律不进这里。
@@ -35,8 +38,8 @@ class WidgetExtrasPlanTest {
     /**
      * "照片自己要的框高"的典型值：150dp = [WidgetData.PHOTO_MAX_DP]（照片比例很大时撞上限）。
      *
-     * 注意这个参数**不是**"空间能给多高"（老名字叫 idealPhotoDp）—— 见
-     * [WidgetData.photoWantedHeightDp] 里 4×2 变 4×3 那段账，那个语义正是本次要修的病。
+     * 注意这个参数**不是**"空间能给多高"（老名字叫 idealPhotoDp）：自动档的框高由余量决定，
+     * 传进来的这个数只表示"照片想要多高"，用来验证"框高恒 ≥ 它"这条下界。
      */
     private val wantedPhoto = WidgetData.PHOTO_MAX_DP
 
@@ -53,12 +56,15 @@ class WidgetExtrasPlanTest {
 
     @Test
     fun bothAreShownWhenThereIsRoomForBoth() {
-        // 余量充足（4×3 组件实测有 80dp 左右）：句子与图片**同时**显示
+        // 余量充足（4×3 组件实测有 80dp 左右）：句子与图片**同时**显示，而且**加起来正好等于余量**
+        // —— 图片框吃掉剩下的每一 dp，底部零头因此是 0（本轮修的那条"下拉之后依然有空白"）
         val p = plan(availableDp = 80)
         assertTrue("有地方就得把句子显示出来（用户的抱怨就是它被图片挤没了）", p.quoteVisible)
         assertTrue(p.photoVisible)
         // 总占用不能超预算：句子(含边距) + 6dp 间距 + 图片框
         assertTrue("句子+边距+图片不能超出余量", quoteCost + gap + p.photoHeightDp <= 80)
+        assertEquals("剩下的全部空间都该归图片框（一格都不留）", 80, quoteCost + gap + p.photoHeightDp)
+        assertEquals("底部零头 = 0", 0, ExtrasPlanner.leftoverBelowBoxDp(p))
     }
 
     @Test
@@ -163,21 +169,33 @@ class WidgetExtrasPlanTest {
 
     @Test
     fun photoHeightNeverExceedsTheBudget() {
-        // 把所有可能的余量都扫一遍：只要图片可见，就绝不能超出余量（否则会被裁掉一截）
+        // 把所有可能的余量都扫一遍：只要图片可见，就绝不能超出余量（否则会被裁掉一截），
+        // 而且**正好用光**余量（本轮：框吃掉剩下的每一 dp → 底部零头恒为 0）
         for (avail in 0..300) {
             val p = plan(availableDp = avail, wantedPhotoDp = 400)
             if (!p.photoVisible) continue
             val cost = gap + p.photoHeightDp + if (p.quoteVisible) quoteCost else 0
             assertTrue("余量 ${avail}dp 时总占用 ${cost}dp 超了", cost <= avail)
+            assertEquals("余量 ${avail}dp 时还剩 $cost → ${avail - cost}dp 没被用上", avail, cost)
             assertTrue("图片高度不能低于硬底线", p.photoHeightDp >= minPhoto)
+            assertEquals("底部零头必须是 0", 0, ExtrasPlanner.leftoverBelowBoxDp(p))
         }
     }
 
     @Test
-    fun idealHeightWinsWhenThereIsPlentyOfRoom() {
-        // 余量足够时给的是"理想高度"（按宽高比算出来的），不是"能塞多高塞多高"
+    fun theBoxEatsTheWholeLeftoverWhenThereIsPlentyOfRoom() {
+        // 余量远大于照片想要的高度（300dp vs 90dp）：框**不再**停在 90dp ——
+        // 停在那个数上就会在组件底部漏出 210dp 的空白（用户反馈的"下拉之后依然有空白"）。
+        // 现在它拿走剩下的全部（300 − 22 句子 − 6 上边距 = 272），底部零头 = 0；
+        // 多出来的高度由 PhotoFit"居中取一块填满"消化，绝不拉伸、也绝不留白。
         val p = plan(availableDp = 300, wantedPhotoDp = 90)
-        assertEquals(90, p.photoHeightDp)
+        assertEquals(272, p.photoHeightDp)
+        assertTrue(p.quoteVisible)
+        assertEquals("底部零头 = 0", 0, ExtrasPlanner.leftoverBelowBoxDp(p))
+        // 只开图片、不开句子时同理：扣掉 6dp 上边距之后全是它的
+        val only = plan(quote = false, availableDp = 300, wantedPhotoDp = 90)
+        assertEquals(294, only.photoHeightDp)
+        assertEquals(0, ExtrasPlanner.leftoverBelowBoxDp(only))
     }
 
     @Test
@@ -349,17 +367,17 @@ class WidgetExtrasPlanTest {
     }
 
     @Test
-    fun afterTheBoxHeightIsFixedTheLeftoverNeverEatsHalfARow() {
-        // 修复后的完整口径：剩下的高度要么变成一整行课，要么是**排不下一整行**的零头（≤ 37dp），
-        // **不会**再变成照片内部的留白（那正是本次要治的现象）。
-        // 两个例外，都是设计如此，下面逐条断言：
-        //  1. 行数封顶（AUTO_MAX_ROWS = 4）之后还有余量 —— 那部分是给用户继续拉高用的留白，
-        //     框并不会去把它吃掉（照片比例决定框高，这是本次改动的核心）；4 行封顶见 WidgetData；
-        //  2. 格子小到"连框带一行都放不下"—— 框会被 ExtrasPlanner 压到可用高度，走"取中间块"。
+    fun afterTheWholeRowsAreFixedTheRestGoesIntoTheBoxSoTheBottomIsNeverBlank() {
+        // 本轮的核心不变量（用户要求"任何高度下底部都没有空白"）：
+        //  1. 行数**永远是整数**，且落在 1..AUTO_MAX_ROWS（硬约束，见上一条）；
+        //  2. 排完整行之后剩下的那条零头（真机实测 24dp）**全部归图片框** → 底部零头 = 0。
+        //
+        // 这条零头以前是留在组件底部的（用户："下拉组件的时候依然有空白"），现在它变成了
+        // 图片框的一部分（多出来的部分由 PhotoFit 居中取一块填满消化）。下面把 90..400dp 全扫一遍。
         val aspect = 3.14f
-        val box = WidgetData.photoWantedHeightDp(226, aspect)          // 72
-        val reserve = box + WidgetData.AREA_GAP_DP                     // 78
-        var cappedLeftover = 0f
+        val wanted = WidgetData.photoWantedHeightDp(226, aspect)       // 72
+        val reserve = wanted + WidgetData.AREA_GAP_DP                  // 78
+        var visible = 0
         for (h in 90..400) {
             // 页脚按 compactFor 收不收（与 rowsFor 内部同源），保证算术与真机链路一致
             val chrome = if (WidgetData.compactFor(h, 0)) {
@@ -368,24 +386,41 @@ class WidgetExtrasPlanTest {
                 WidgetData.CHROME_DP
             }
             val rows = WidgetData.photoRowsFor(h, 226, 0, aspect)
-            val leftover = h - (chrome + rows * WidgetData.ROW_SLOT_DP + reserve)
-            if (leftover < 0) {
-                // 只有"算出来的行数被夹到 1"的极小格子才会溢出：框会被 plan 压下来说明原因
-                assertTrue(
-                    "${h}dp 溢出 ${leftover}dp，但这个高度不该溢出",
-                    h < chrome + reserve + WidgetData.ROW_SLOT_DP
-                )
-            } else if (rows < WidgetData.AUTO_MAX_ROWS) {
-                assertTrue(
-                    "${h}dp 剩下 ${leftover}dp —— 够一整行了却没排进去（等于白白浪费）",
-                    leftover < WidgetData.ROW_SLOT_DP
-                )
-            } else {
-                // 4 行封顶：多出来的高度确实留着（老代码里这一步是"给图片"，现在是"谁也不给"）
-                cappedLeftover = leftover
+            assertEquals(
+                "${h}dp 的列表高度必须是行高的整数倍（否则底部会露半行）",
+                0f, (rows * WidgetData.ROW_SLOT_DP) % WidgetData.ROW_SLOT_DP, 0.001f
+            )
+            val space = (h - chrome - rows * WidgetData.ROW_SLOT_DP).toInt()
+            val p = ExtrasPlanner.plan(
+                override = 0,
+                quoteEnabled = false,
+                photoEnabled = true,
+                photoCount = 1,
+                availableDp = space,
+                wantedPhotoDp = wanted
+            )
+            if (!p.photoVisible) {
+                // 极小格子：余量扣掉 6dp 上边距之后连硬底线都不够 → 不显示（宁可不显示也不要彩条）
+                assertTrue("${h}dp 的空间 ${space}dp 不该显不出图片", space - 6 < WidgetData.PHOTO_HARD_MIN_DP)
+                continue
             }
+            visible++
+            assertEquals("${h}dp：底部零头必须是 0", 0, ExtrasPlanner.leftoverBelowBoxDp(p))
+            // 框高 = 余量 − 6dp 上边距；而且**恒 ≥ 照片想要的高度**（行数是按它预留的）
+            assertEquals("${h}dp 的框高", space - WidgetData.AREA_GAP_DP, p.photoHeightDp)
+            assertTrue(
+                "${h}dp：框高 ${p.photoHeightDp} 不该小于照片想要的 $wanted（空间够的档位）",
+                p.photoHeightDp >= wanted || space < reserve
+            )
+            // 整条链路加起来不能超出格子：头部 + 列表 + 上边距 + 框 ≤ 高度
+            assertTrue(
+                "${h}dp：${chrome} + ${rows * 38f} + 6 + ${p.photoHeightDp} 超了",
+                chrome + rows * WidgetData.ROW_SLOT_DP + WidgetData.AREA_GAP_DP + p.photoHeightDp <= h
+            )
         }
-        assertTrue("封顶之后确实还有余量（否则这条用例失去了它要守的那一档）", cappedLeftover > 0)
+        // 311 个高度里，图片可见的是 276 个；剩下 35 个（90..124dp 那些极小格子）连 32dp 的硬底线
+        // 都占不下 → 不显示图片（宁可不显示，也不要一条彩条）。数字变了说明覆盖范围变了。
+        assertEquals("90..400dp 里能显示图片的高度数", 276, visible)
     }
 
     // ------------------------------------------------- 没有照片时与老行为逐值一致
@@ -455,16 +490,15 @@ class WidgetExtrasPlanTest {
     }
 
     @Test
-    fun theBoxStaysFixedWhileTheExtraSpaceBecomesWholeRows() {
-        // 本轮的核心回归：**下拉组件 → 框不动、多显示一整行课**。
-        // 老行为是"框跟着余量长高"，于是同一张照片在 4×3 里被塞进一个比它高 63dp 的框 →
-        // 完整显示 + 上下各留一大段空白，而课程一行都没多（用户原话："图片保持不变会流出很多空白"）。
-        val aspect = 3.14f                                   // 用户按 4×2（226:72）裁出来的那张
-        val box = WidgetData.photoWantedHeightDp(226, aspect)  // 72dp
-        val reserve = box + WidgetData.AREA_GAP_DP             // 78dp
+    fun theBoxEatsTheLeftoverInsteadOfLeavingItAtTheBottom() {
+        // 本轮的核心回归：**下拉组件 → 多出来的高度先变成整行课，最后那点零头归图片框**，
+        // 于是组件底部一条空白都不留。
+        // 老行为是"零头留在底部"（真机实测 24dp）—— 用户原话："组件下拉的时候依然有空白"。
+        val aspect = 3.14f
+        val wanted = WidgetData.photoWantedHeightDp(226, aspect)   // 72dp
 
-        fun rowsAt(h: Int) = WidgetData.rowsFor(h, 0, WidgetData.ROW_SLOT_DP, reserve)
-        fun availAt(h: Int): Int {
+        fun rowsAt(h: Int) = WidgetData.photoRowsFor(h, 226, 0, aspect)
+        fun spaceAt(h: Int): Int {
             val chrome = if (WidgetData.compactFor(h, 0)) {
                 WidgetData.CHROME_DP - WidgetData.FOOTER_DP
             } else {
@@ -472,26 +506,39 @@ class WidgetExtrasPlanTest {
             }
             return (h - chrome - rowsAt(h) * WidgetData.ROW_SLOT_DP).toInt()
         }
-        fun boxAt(h: Int) = ExtrasPlanner.plan(
-            0, false, true, 3, availAt(h), WidgetData.photoBoxTargetDp(availAt(h), 226, aspect)
-        ).photoHeightDp
+        fun planAt(h: Int): ExtrasPlan =
+            ExtrasPlanner.plan(0, false, true, 3, spaceAt(h), wanted)
 
-        // 4×2（187dp）：预留 78 → 1 行课；剩下 78dp 全给框，框要 72dp → 给 72（多出的 1dp 留白可忽略）
+        // 4×2（187dp）：1 行课 + 剩下的 78dp 全给框 → 框正好 72dp（= 照片想要的高度）
+        // → 比例一致 → [PhotoFit] 判"整张都在"，一个像素都不裁
         assertEquals(1, rowsAt(187))
-        assertEquals(72, boxAt(187))
-        // 4×3（250dp）：框**一寸都没变**，多出来的 63dp 是整行课
+        assertEquals(72, planAt(187).photoHeightDp)
+        assertEquals(wanted, planAt(187).photoHeightDp)
+        // 4×3（250dp）：多出来的 63dp 先变成**第二行课**，剩下的零头归框 → 97dp
         assertEquals(2, rowsAt(250))
-        assertEquals("框必须仍是 72dp：照片比例没变，框就不该变", 72, boxAt(250))
-        // 再往上拉：到 288dp 才轮到第 3 行，而框始终是 72dp —— 不会出现"下拉只是把空白拉大"
+        assertEquals(97, planAt(250).photoHeightDp)
+        // 再往上拉：到 288dp 才轮到第 3 行，而这一档的框**仍是 97dp**（多出来的高度全变成了课）
         assertEquals(3, rowsAt(288))
-        assertEquals(72, boxAt(288))
+        assertEquals(97, planAt(288).photoHeightDp)
         assertEquals(4, rowsAt(326))
-        assertEquals(72, boxAt(326))
-        assertEquals("4 行封顶后框仍然不动", 72, boxAt(400))
+        assertEquals(97, planAt(326).photoHeightDp)
+        // 4 行封顶（AUTO_MAX_ROWS）之后再拉高：没有行可加了，剩下的高度归框 → 171dp。
+        // （这一档是"框变高、照片居中取一块"的最极端情况，但至少那块空间里是用户的照片，
+        //   而不是一条底色 —— 用户："比留一条空白好看，也比拉伸好"）
+        assertEquals(WidgetData.AUTO_MAX_ROWS, rowsAt(400))
+        assertEquals(171, planAt(400).photoHeightDp)
 
-        // 空间不够那一档（90dp 的最小格子）保持现状：框被压到可用高度之下 → 图片区不显示
-        assertTrue("90dp 放不下框 + 一整行课", availAt(90) < WidgetData.PHOTO_HARD_MIN_DP)
-        assertEquals(0, boxAt(90))
+        // 上面每一档的底部零头都必须正好是 0
+        for (h in listOf(187, 250, 288, 326, 400)) {
+            assertEquals("${h}dp 的底部零头", 0, ExtrasPlanner.leftoverBelowBoxDp(planAt(h)))
+        }
+
+        // 最矮的格子（90dp）保持现状：连"框 + 一整行课"都放不下 → 不显示图片（不是显示一条彩条）
+        assertTrue(
+            "90dp 放不下框 + 一整行课",
+            spaceAt(90) - WidgetData.AREA_GAP_DP < WidgetData.PHOTO_HARD_MIN_DP
+        )
+        assertEquals(0, planAt(90).photoHeightDp)
     }
 
     // ------------------------------------------------- 裁剪框：组件是几乘几
@@ -499,10 +546,12 @@ class WidgetExtrasPlanTest {
     /**
      * 用户原话：「注意组件是几乘几」。
      *
-     * 裁剪框的**高**现在只由"照片的比例 × 内容宽度"决定（[WidgetData.photoFrameHeightDp]）。
-     * 于是"用户按这个框裁出来的照片" 与 "组件里那个框" **恒等** —— 换尺寸、换行数都不会变，
-     * 因为裁剪框的形状本来就不该随组件的行数变化：那正是上一版（把渲染链路抄一遍）的病，
-     * 它让用户在 4×2 上裁好的照片在 4×3 里两边各留一大段空白。
+     * 裁剪框的**高**只由"照片的比例 × 内容宽度"决定（[WidgetData.photoFrameHeightDp]）：
+     * **它没有高度参数**，换组件高度对它没有任何影响。理由：同一个组件里混进两种形状的照片
+     * 是最难查的一类问题（用户在 4×3 上导入的图和 4×2 时导入的图不同形，点一下换一张就变形状）。
+     *
+     * 注意它**不等于**组件里那个框的高（本轮改过）：图片框现在吃掉列表下方的全部剩余空间，
+     * 只有"导入时那个尺寸"上两者才相等；用户后来改过尺寸时由 [PhotoFit.layout] 居中取一块填满。
      */
     @Test
     fun theCropFrameHeightIsTheBoxHeightWhateverTheWidgetHeight() {
@@ -511,16 +560,17 @@ class WidgetExtrasPlanTest {
         assertEquals(72, height)
         // 关键：**它没有高度参数** —— 换组件高度对它没有任何影响（4×2 / 4×3 / 最矮的 90dp 都一样）
         for (h in listOf(90, 150, 187, 250, 400, 1000)) {
-            // 组件高度只影响排几行课（见下一条），框高逐值不变
+            // 组件高度只影响排几行课（见下一条），裁剪框高逐值不变
             WidgetData.photoRowsFor(h, 226, 0, aspect)      // 不炸即可，行数在别处断言
             assertEquals("组件 ${h}dp 时裁剪框高不该变", 72, height)
         }
-        // 与渲染链路对齐：组件里那个框用的就是这个高度
+        // [WidgetData.photoBoxTargetDp] 给的是**同一个数**（照片想要的高度 / 排行数时的预留来源），
+        // 它同样不听余量参数（第一个参数是留着的线索，不参与计算）
         assertEquals(72, WidgetData.photoBoxTargetDp(78, 226, aspect))
-        // 每日一句也开着 / 手动指定行数：都只影响"排几行课"，不影响框高（老算法会把图片压到 50dp）
+        // 每日一句也开着 / 手动指定行数：都只影响"排几行课"，不影响这个数（老算法会把图片压到 50dp）
         assertEquals(72, WidgetData.photoBoxTargetDp(0, 226, aspect))
-        // 换一张 16:9 的照片：框高跟着照片走（这才叫"注意组件是几乘几"的正确解法 ——
-        // 用户看到的那条框，形状等于组件里图片区的形状）
+        // 换一张 16:9 的照片：数目跟着照片走（这才叫"注意组件是几乘几"的正确解法 ——
+        // 用户看到的那条框，形状由照片自己的比例决定）
         assertEquals(127, WidgetData.photoFrameHeightDp(226, 16f / 9f))
     }
 
@@ -565,31 +615,31 @@ class WidgetExtrasPlanTest {
         assertEquals("零留边", 0, layout.padY)
         assertEquals("整张都在", "720x229@(0,0)", layout.window.toString())
 
-        // **换一张不同比例的照片也一样**：比例取自照片 → 框高随照片变 → 用户按这条框裁出来的图
-        // 落到组件里仍然是"完整显示、一个像素都不裁"。
+        // **换一张不同比例的照片也一样**：比例取自照片 → 数目随照片变 → 用户按这条框裁出来的图
+        // 落到组件里仍然是"整张都在、铺满、零留边"。
         //
-        // 这里**必须**走生产同源的那几个函数（框高 → 解码目标 → 存盘尺寸），不能自己写一串
-        // 理想值去凑，两个坑都踩过一次：
-        //  1. 框高是**整数 dp**。16:9 的严格值是 127.125 → 取整成 127，而 226/127 = 1.7795
-        //     比 16:9 **宽**：一个像素都不裁的"真 16:9 图"放进去反而不满足 `fitsWhole`
-        //     （整数交叉相乘），会落到"取中间块"裁掉一条。所以这条用 99dp（226/99 与 16:9 的
-        //     差只有 0.3%）来说明"换比例也照样零留边"这件事；
-        //  2. `PhotoBitmap.targetPx` 还会按 binder 预算（300KB ÷ 2 字节）**等比缩**一次 ——
-        //     box 高 99dp 时原始目标是 594×260，缩成 592×259。缩的是"解码多少像素"，
-        //     不是"图放不放得下"，所以结论不变（下面断言）。
-        // 想表达的结论只有一条：**放得下**（不裁、不变形、产出宽逐值等于框宽）。
+        // 这里**必须**走生产同源的那几个函数（照片比例 → 裁剪框高 → 解码目标 → 存盘尺寸），
+        // 不能自己写一串理想值去凑，两个坑都踩过一次：
+        //  1. 裁剪框高是**整数 dp**。16:9 的严格值是 127.125 → 取整成 127，而 226/127 = 1.7795
+        //     比 16:9 **宽**，于是"窗口 == 整张源图"这条判据会差一点点。所以这条用 99dp
+        //     （226/99 与 16:9 的差只有 0.3%）来说明"换比例也照样零留边"这件事；
+        //  2. `PhotoBitmap.targetPx` 在像素总数超预算时会**等比缩**一次（600KB ÷ 2 字节）。
+        //     这一档 594×260 远在预算内，所以没有缩 —— 但断言仍然按它给出的数走，
+        //     免得哪天预算变了这条用例变成假绿。
+        // 想表达的结论只有一条：**整张都在**（不裁、不变形、产出逐值等于框）。
         val box99 = 99
         val frame99 = PhotoCrop.frame(226, box99)
         val target99 = PhotoBitmap.targetPx(226, box99, 2.625f)
         val saved99 = PhotoCrop.encodeSize(frame99, target99[0])
         val layout99 = PhotoFit.layout(saved99[0], saved99[1], target99[0], target99[1])!!
         assertTrue(
-            "换一张不同比例的照片，按这条框裁出来的图同样必须完整显示：框=${frame99.label} " +
+            "换一张不同比例的照片，按这条框裁出来的图同样必须整张都在：框=${frame99.label} " +
                 "存盘=${saved99.toList()} 目标=${target99.toList()} 结论=${layout99.verdict}",
             layout99.whole
         )
         assertEquals("产出宽必须逐值等于框宽（宿主端零缩放）", target99[0], layout99.outWidth)
-        assertEquals("产出高按图自身比例、不超过框高", target99[1], layout99.outHeight)
+        assertEquals("产出高必须逐值等于框高（填满、零留边）", target99[1], layout99.outHeight)
+        assertEquals(0, layout99.padY)
         // 换比例之后框高确实跟着照片走（不是钉死的某个数）
         assertTrue(
             "框高必须随照片比例变化：${box99}dp（16:9）vs ${frameHeight}dp（3.14:1）",
@@ -598,24 +648,31 @@ class WidgetExtrasPlanTest {
     }
 
     @Test
-    fun resizingTheWidgetLaterOnlyEverShowsMoreOrCropsCentred() {
+    fun resizingTheWidgetLaterOnlyEverCropsCentredAndNeverLeavesBlanks() {
         // 用户裁完以后又拖了组件尺寸：这时"框"与"裁剪图"的比例不再相等，
-        // 两种结果都必须是可预期的：更高 → 完整显示（留边）；更扁 → 居中取一块。
+        // 两种结果都必须是可预期的：**更高 → 居中取一块（左右各裁一条）；更扁 → 居中取一块（上下各裁一条）**。
+        // 两者都不会留白、不会拉伸 —— 这是本轮的核心取舍（用户："比留一条空白好看，也比拉伸好"）。
         val frame = PhotoCrop.frame(226, 72)
         val saved = PhotoCrop.encodeSize(frame, 594)          // 720×229（3.14:1）
 
-        // 组件被拉高（图片区 100dp → 框 594×263px，2.26:1）：放得下 → 整张 + 上下留边
+        // 组件被拉高（图片区 100dp → 框 594×263px，2.26:1）：保整高、左右各裁一条
         val taller = PhotoFit.layout(saved[0], saved[1], 594, 263)!!
-        assertTrue("框比图高 → 完整显示", taller.whole)
-        assertEquals("宽仍逐值等于框宽", 594, taller.outWidth)
-        assertEquals(189, taller.outHeight)                   // 按图自身比例
-        assertEquals(74, taller.padY)
+        assertFalse("框比图高 → 取中间块（不再留边）", taller.whole)
+        assertEquals("产出逐值等于框宽", 594, taller.outWidth)
+        assertEquals("产出逐值等于框高（填满）", 263, taller.outHeight)
+        assertEquals("一条留白都没有", 0, taller.padY)
+        // 窗口 = 整高 229、宽 round(229 × 594/263) = 517，左右各裁 (720 − 517) ÷ 2 = 102
+        assertEquals(517, taller.window.width)
+        assertEquals(229, taller.window.height)
+        assertEquals(102, taller.window.x)
+        assertEquals(0, taller.window.y)
 
-        // 组件被压扁（图片区 40dp → 框 594×105px，5.66:1）：放不下 → 居中取一块填满
+        // 组件被压扁（图片区 40dp → 框 594×105px，5.66:1）：保整宽、上下各裁一条
         val flatter = PhotoFit.layout(saved[0], saved[1], 594, 105)!!
         assertFalse("框比图扁 → 取中间块", flatter.whole)
         assertEquals(594, flatter.outWidth)
         assertEquals(105, flatter.outHeight)
+        assertEquals(0, flatter.padY)
         // 窗口仍是整宽、比例与框一致、居中
         assertEquals(720, flatter.window.width)
         assertEquals(127, flatter.window.height)              // round(720 ÷ 5.657)
@@ -623,57 +680,113 @@ class WidgetExtrasPlanTest {
     }
 
     /**
-     * 用户要的可核对数字：**4×2 / 4×3 两种组件高度**下，框高、照片需要的高、留边、行数。
+     * **用户指定要核对的那张表**：组件 150 / 187 / 250 / 318dp 时的全部数字。
      *
      * 全部由生产同源的函数算出来（没有一处是手抄的理想值），density 取真机实测的 2.625。
-     * 用户会拿这套数字去对着桌面截图数像素，所以这里逐值钉住。
+     * 用户会拿这套数字去对着桌面截图数像素，所以这里逐值断言，并把整张表打到 stdout
+     * （`build/test-results/testDebugUnitTest` 目录里每个测试类一个 XML，
+     * `system-out` 节点里能直接读到）。
      *
      * 前提：照片是用户按 4×2 那条框（226:72）裁出来的那张 → 宽高比 ≈ 3.14:1。
      */
     @Test
-    fun theNumbersForFourByTwoAndFourByThreeWidgets() {
+    fun theNumbersForEveryReferenceHeight() {
         val density = 2.625f
         val ratio = 720f / 229f
         val contentDp = 226
         val wanted = WidgetData.photoWantedHeightDp(contentDp, ratio)
         assertEquals("照片需要的框高（226dp ÷ 3.14）", 72, wanted)
 
-        fun report(heightDp: Int): String {
-            val rows = WidgetData.photoRowsFor(heightDp, contentDp, 0, ratio)
+        val heights = listOf(150, 187, 250, 318)
+        // 与真机链路同源：行数 → 余量 → 计划 → 解码目标 → 渲染结论（一个数字都不手抄）
+        fun rowsAt(heightDp: Int) = WidgetData.photoRowsFor(heightDp, contentDp, 0, ratio)
+        fun spaceAt(heightDp: Int): Int {
             val chrome = if (WidgetData.compactFor(heightDp, 0)) {
                 WidgetData.CHROME_DP - WidgetData.FOOTER_DP
             } else {
                 WidgetData.CHROME_DP
             }
-            val space = (heightDp - chrome - rows * WidgetData.ROW_SLOT_DP).toInt()
-            val plan = ExtrasPlanner.plan(
-                0, false, true, 1, space, WidgetData.photoBoxTargetDp(space, contentDp, ratio)
-            )
-            val target = PhotoBitmap.targetPx(contentDp, plan.photoHeightDp, density)
-            val frame = PhotoCrop.frame(contentDp, wanted)
-            val saved = PhotoCrop.encodeSize(frame, target[0])
-            val layout = PhotoFit.layout(saved[0], saved[1], target[0], target[1])!!
-            assertTrue("框高必须等于照片需要的高（空间够）", plan.photoHeightDp == wanted)
-            assertEquals("必须完整显示、零留边", 0, layout.padY)
-            return "组件=${heightDp}dp 行数=$rows 余量=${space}dp 框=${contentDp}x${plan.photoHeightDp}dp " +
-                "框高=${plan.photoHeightDp} 需要的框高=$wanted 留边=${layout.padY}px target=${target.toList()} " +
-                "存盘=${saved.toList()}"
+            return (heightDp - chrome - rowsAt(heightDp) * WidgetData.ROW_SLOT_DP).toInt()
+        }
+        fun planAt(heightDp: Int): ExtrasPlan = ExtrasPlanner.plan(
+            0, false, true, 1, spaceAt(heightDp), WidgetData.photoBoxTargetDp(spaceAt(heightDp), contentDp, ratio)
+        )
+        fun targetAt(heightDp: Int) =
+            PhotoBitmap.targetPx(contentDp, planAt(heightDp).photoHeightDp, density)
+        fun layoutAt(heightDp: Int): PhotoFit.Layout {
+            val target = targetAt(heightDp)
+            val saved = PhotoCrop.encodeSize(PhotoCrop.frame(contentDp, wanted), target[0])
+            return PhotoFit.layout(saved[0], saved[1], target[0], target[1])!!
         }
 
-        // 4 列 × 2 行（实测 187dp）：下拉前 —— 1 行课 + 正好装下照片的框
-        val fourByTwo = report(187)
+        /** 用户要看的那一行（真机日志里的列与它一一对应） */
+        fun report(heightDp: Int): String {
+            val rows = rowsAt(heightDp)
+            val space = spaceAt(heightDp)
+            val plan = planAt(heightDp)
+            val leftover = ExtrasPlanner.leftoverBelowBoxDp(plan)
+            val target = targetAt(heightDp)
+            val saved = PhotoCrop.encodeSize(PhotoCrop.frame(contentDp, wanted), target[0])
+            val layout = layoutAt(heightDp)
+            // 每一档都必须成立的不变量（= 日志里那两列要核对的结论）
+            assertEquals("${heightDp}dp 的底部零头必须是 0", 0, leftover)
+            assertEquals("${heightDp}dp 的照片区里不许有留边", 0, layout.padY)
+            assertEquals("${heightDp}dp 的产出必须逐值等于框宽", target[0], layout.outWidth)
+            assertEquals("${heightDp}dp 的产出必须逐值等于框高", target[1], layout.outHeight)
+            // 框高 ≥ 照片想要的高度 —— 但只保证在"空间至少够预留"的档位：
+            // 更矮的格子（150dp 是最矮那一档）本来就装不下"框 + 一整行课"，
+            // 这时框被压扁、照片居中取一块，属于允许的兜底（见 ExtrasPlanner 的类注释）
+            assertTrue(
+                "${heightDp}dp 的框高 ${plan.photoHeightDp} 不该小于照片想要的 $wanted",
+                plan.photoHeightDp >= wanted || space < wanted + WidgetData.AREA_GAP_DP
+            )
+            return "组件=${heightDp}dp 行数=$rows 余量=${space}dp 框=${contentDp}x${plan.photoHeightDp}dp " +
+                "框比例=${PhotoBitmap.ratioLabel(contentDp, plan.photoHeightDp)} " +
+                "照片比例=${PhotoBitmap.ratioLabel(saved[0], saved[1])} " +
+                "结论=${layout.verdict} 窗=${layout.window} 留边=${layout.padY}px " +
+                "底部零头=${leftover}dp 存盘=${saved.toList()} target=${target.toList()} " +
+                "bitmap=${layout.outWidth}x${layout.outHeight} " +
+                "byteCount=${layout.outWidth * layout.outHeight * PhotoBitmap.BYTES_PER_PIXEL}B"
+        }
+
+        // 先把表打出来（`build/test-results/testDebugUnitTest/*.xml` 的 system-out 里能读到，
+        // 用户就是拿它去对着桌面截图数像素的），再做逐档断言
+        println("=== 图片区与底部空白核对表（内容宽 ${contentDp}dp，照片 3.14:1，density $density）===")
+        heights.forEach { println(report(it)) }
+
+        // ---- 逐档钉住的数字（这几列是"改动了就要显式改"的判据）----
+        // 行数：150/187 都是 1 行；250 是 2 行（下拉多出一整行课）；318 到自动档封顶 4 行
+        assertEquals(listOf(1, 1, 2, 4), heights.map { rowsAt(it) })
+        // 框高 = 余量 − 6dp（150 那档比照片想要的 72dp 矮 → 取中间块）
+        assertEquals(listOf(35, 72, 97, 89), heights.map { planAt(it).photoHeightDp })
+        // 解码尺寸（框的像素尺寸，density 2.625）
         assertEquals(
-            "组件=187dp 行数=1 余量=78dp 框=226x72dp 框高=72 需要的框高=72 留边=0px " +
-                "target=[594, 189] 存盘=[720, 229]",
-            fourByTwo
+            listOf(listOf(594, 92), listOf(594, 189), listOf(594, 255), listOf(594, 234)),
+            heights.map { targetAt(it).toList() }
         )
-        // 4 列 × 3 行（实测 250dp）：下拉后 —— 多出一整行课，框**一个 dp 都没变**、仍然零留边
-        val fourByThree = report(250)
+        // 过 binder 的真实字节数（RGB_565，2 字节/像素；上限 600KB，见 PhotoBitmap.MAX_BITMAP_BYTES）
         assertEquals(
-            "组件=250dp 行数=2 余量=103dp 框=226x72dp 框高=72 需要的框高=72 留边=0px " +
-                "target=[594, 189] 存盘=[720, 229]",
-            fourByThree
+            listOf(109_296, 224_532, 302_940, 277_992),
+            heights.map { layoutAt(it).let { l -> l.outWidth * l.outHeight * PhotoBitmap.BYTES_PER_PIXEL } }
         )
+        // 结论：只有"框高 == 照片想要的高度"那一档（187dp，也就是用户裁图时那个尺寸）是整张显示
+        assertEquals(
+            listOf("取中间块", "完整显示", "取中间块", "取中间块"),
+            heights.map { layoutAt(it).verdict }
+        )
+        // 而无论哪一档，底部零头都是 0（= 日志里的 `底部零头=0dp`）
+        assertEquals(
+            List(heights.size) { 0 },
+            heights.map { ExtrasPlanner.leftoverBelowBoxDp(planAt(it)) }
+        )
+
+        // 用户要核对的那几列（文本级钉住，免得日志格式悄悄改了）
+        for (h in heights) {
+            val line = report(h)
+            assertTrue("缺少 组件=${h}dp：$line", line.contains("组件=${h}dp"))
+            assertTrue("缺少 底部零头=0dp：$line", line.contains("底部零头=0dp"))
+            assertTrue("缺少 留边=0px：$line", line.contains("留边=0px"))
+        }
     }
 
     // ------------------------------------------------- 代码常量 ↔ 布局 XML

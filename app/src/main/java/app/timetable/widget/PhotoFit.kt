@@ -11,34 +11,39 @@ package app.timetable.widget
  * > 「我不是要你有显示倍率，而是导入图片的时候可以自己裁剪，而且在空间足够的时候图片完整显示，
  * >   不够的时候显示自己裁剪的部分，注意组件是几乘几。」
  *
- * 上一轮把"裁哪一块"交给用户（显示方式 / 裁哪一段 / 放大倍数三个开关）。用户把这条路否掉了：
- * **裁哪一块由用户在图库导入时自己裁一次**（[PhotoCrop] + `ui/PhotoCropDialog.kt`），
- * 之后渲染只做程序能判断的事 —— 组件给图片区留的高度够不够。
+ * 裁哪一块由用户在图库导入时自己裁一次（[PhotoCrop] + `ui/PhotoCropDialog.kt`），
+ * 渲染只做程序能判断的事。
  *
- * ## 渲染的两条分支（[layout]）—— 这就是全部规则
+ * ## 渲染的规则（[layout]）—— 这就是全部
  *
- * 记 `r框 = 框宽/框高`、`r图 = 图宽/图高`：
+ * **产出永远逐值等于框**（[Layout.outWidth] / [Layout.outHeight] 就是框的像素尺寸），
+ * 也就是"**填满，绝不留白、绝不拉伸**"：从（用户已经裁好的）源图里取一个**与框同比例、
+ * 居中、尽可能大**的矩形（[centerWindow]），再缩到框的像素尺寸。
  *
- * 1. **放得下**（`r图 ≥ r框`，等价于"框的高度 ≥ 按图的比例算出来的高度"）→ **完整显示**：
- *    整张图按框宽等比缩进去，一个像素都不裁，多出来的高度就是上下留边（[Layout.padY]）；
- * 2. **放不下**（`r框 > r图`，框比图更扁）→ 在**这张（已经裁过的）图内部**取**居中**的一块，
- *    保持框的比例，缩到框的像素尺寸填满。
+ * 记 `r框 = 框宽/框高`、`r图 = 图宽/图高`，两种可观察的结果：
  *
- * 两种情况都**不拉伸**、都**不再二次裁剪**（占满那条分支的产出就是框本身，另一条分支的留边
- * 由布局自己的圆角底色承担），而且产出的宽度**逐像素等于框宽** —— 宿主 ImageView 的
- * `fitCenter`（见 `widget_today.xml`）在这两条路上的缩放因子都恰好是 1：
+ * 1. **比例一致**（`r图 == r框`，在 dp→px 取整的误差内）→ 取到的那块**就是整张源图**
+ *    → [Layout.whole] = true，日志写「完整显示」：用户按裁剪框裁出来的照片原样出现，
+ *    一个像素都不裁（这也是导入时那条框与组件同形带来的常态）；
+ * 2. **比例不一致**（框被拉高/压扁之后）→ 取到的是源图**内部**的一块
+ *    → [Layout.whole] = false，日志写「取中间块」：保持框的比例、居中、不越界。
  *
- * - 放不下：产出 = 框的像素尺寸 → `fitCenter` 是恒等变换；
- * - 放得下：产出宽 = 框宽、高 = 按图自身比例算出来的高（≤ 框高）→
- *   `scale = min(框宽/产出宽, 框高/产出高) = min(1, ≥1) = 1`，同样一个像素都不动。
+ * ### 为什么不再有"放得下就上下留边"这条分支（本轮改掉的）
  *
- * ### 为什么"放得下"那条路不把留边也画进位图
+ * 上一版的规则是"框比图高 → 整张按框宽缩进去 + 上下留边（[Layout.padY]）"。那一版的前提是
+ * **框高恒等于照片自己要的高度**（`WidgetData.photoWantedHeightDp`），所以当时"框比图高"并不常见。
+ * 本轮把框高改成"吃掉课程列表下方的**全部**剩余空间"之后（用户反馈：下拉组件时底部还剩一条
+ * 不足一整行的空白），框**天然**会比照片高 —— 那条留边就又变成了用户看到的"照片下方一条空白"。
  *
- * 那需要把留白绘制成一个**不透明矩形**，而图片框的底色是布局里那张圆角 drawable
- * （明 `widget_row_bg` / 暗 `widget_row_bg_dark` 两套，见 [WidgetColors]）。
- * 在位图里涂一块死色，必然在某个主题下和圆角底色对不上（还会盖住圆角）；
- * 让位图比框窄/矮一点、由宿主居中，留边正好是布局自己的圆角底色 —— 这也是上一版
- * 「完整显示」模式的同一条思路。代价只有一个：留边时传过去的字节数更少（更省 binder）。
+ * 现在的取舍是**宁可裁一点、也不留白**：照片是用户自己选的，留白是纯粹的浪费。
+ * 而"裁"这件事对用户是可预期的 —— 裁剪框的形状 = 导入那一刻组件的形状，比例天然一致，
+ * 所以只有在他后来改过组件尺寸时才会真的裁到，而且裁的是**正中间**那一块。
+ *
+ * ### 为什么产出必须逐值等于框（而不是"宽等于框宽、高按图自身的比例"）
+ *
+ * 位图逐值等于框，宿主 `fitCenter`（见 `widget_today.xml`）就是**恒等变换**：
+ * 既不缩放也不裁剪，画面完全由我们这边的算术决定 —— 这也意味着"组件里看到的那一块"
+ * 与"这里算出来的窗口"逐像素对应，用户拿截图取像素核对才有意义。
  */
 internal object PhotoFit {
 
@@ -65,7 +70,13 @@ internal object PhotoFit {
      * 这一次渲染的结论：走哪条分支、从源图上取哪一块、产出多大的位图。
      */
     internal class Layout(
-        /** true = 完整显示（放得下）；false = 取裁剪图的中间一块（放不下） */
+        /**
+         * true = **完整显示**：取到的那块就是整张源图（比例一致，一个像素都没裁）；
+         * false = **取中间块**：框被拉高/压扁过，取的是源图内部居中那一块。
+         *
+         * 注意它现在的含义是"窗口是否等于整张源图"，而**不是**上一版的"放得下"：
+         * 产出永远等于框（见类注释），所以"不裁"只可能发生在"比例一致"这一档。
+         */
         val whole: Boolean,
         val window: Window,
         val outWidth: Int,
@@ -74,7 +85,13 @@ internal object PhotoFit {
         val targetW: Int,
         val targetH: Int
     ) {
-        /** 上下留边合计（只有"完整显示"分支才可能 > 0；左右永远为 0，因为产出宽 = 框宽） */
+        /**
+         * 上下留边合计（px）。现在**恒为 0**：产出逐值等于框，照片区里没有一条留白。
+         *
+         * 保留这个字段是有意的 —— 日志里 `留边=0px(0%)` 就是"没有留白"这条结论的**判据**，
+         * 而它曾经是 74px(28%)（用户："图片保持不变会流出很多空白"）。哪一天它又变成正数，
+         * 说明"框被填满"这条规则被人改回去了。
+         */
         val padY: Int get() = (targetH - outHeight).coerceAtLeast(0)
 
         /** 留边占框的比例（日志用：0 = 铺满，0.27 = 27% 的框是留边底色） */
@@ -92,16 +109,17 @@ internal object PhotoFit {
     }
 
     /**
-     * 纯函数（可单测）：**放得下吗** —— 下面这条分支判据的全部定义。
+     * 纯函数（可单测）：**图比框更宽（或同比例）吗** —— 也就是"要填满框的话，该裁的是哪条边"。
      *
      * `r图 ≥ r框` ⟺ `图宽/图高 ≥ 框宽/框高` ⟺ `图宽 × 框高 ≥ 框宽 × 图高`。
      * 这里用**整数交叉相乘**（并且先转 Long）而不是两个 float 相除相比：
-     *  - float 比较在"两边比例完全相等"时会被浮点误差判反（例：917×137 的图进 917×137 的框），
-     *    那会让本该"完整显示（零留边）"的情况掉进取中间块、平白切掉一条；
+     *  - float 比较在"两边比例完全相等"时会被浮点误差判反（例：720×229 的图进 594×189 的框，
+     *    两边都是 3.14:1），那会让本该"整张都在"的情况平白切掉一条边 —— 用户按裁剪框裁好的
+     *    照片，落进组件里就少一列像素；
      *  - 交叉相乘在 Int 上会溢出（4000×4000×… 很容易越过 2^31），所以先转 Long。
      *
-     * 语义上它就是用户那句"小组件给图片留出的高度 ≥ 按裁剪框比例算出来的高度"：
-     * 把落进框宽所需的高度记为 `框宽 × 图高 / 图宽`，它 ≤ 框高 时就是放得下。
+     * 成立 → 保住**整高**、左右各裁一条（框比图更高时就是这一档）；不成立 → 保住**整宽**、
+     * 上下各裁一条。这一档判据只决定"裁哪条边"，**不再决定"要不要留边"**（见类注释）。
      */
     fun fitsWhole(srcW: Int, srcH: Int, targetW: Int, targetH: Int): Boolean {
         if (srcW <= 0 || srcH <= 0 || targetW <= 0 || targetH <= 0) return false
@@ -109,18 +127,18 @@ internal object PhotoFit {
     }
 
     /**
-     * 纯函数（可单测）：**放不下**时该从源图上取哪一块 —— 居中、与框同比例、贴满源图的一条边。
+     * 纯函数（可单测）：**从源图上取哪一块** —— 与框同比例、居中、尽可能大（填满框的那一块）。
      *
-     * 记 `r = 框宽/框高`，源图里"与框同比例"的矩形有两个极端：
+     * 本轮的规则只有这一条：产出永远是"框被填满"，所以窗口**永远**是与框同比例的矩形：
      *
      * ```
-     * byW = srcH × r      // 用源图整高推出来的宽度
-     * byH = srcW ÷ r      // 用源图整宽推出来的高度
+     * fitsWhole（图比框宽/同比例）→ 保住整高：宽 = round(srcH × r)，左右居中
+     * 否则（图比框高/更窄）        → 保住整宽：高 = round(srcW ÷ r)，上下居中
      * ```
      *
-     * 取 `宽 = min(srcW, byW)`、`高 = min(srcH, byH)` —— 就是"把源图多出来的那条边按框的比例切掉"。
-     * 本分支成立时（框比图更扁）必然切的是**上下**（宽整用），切完居中摆放：
-     * 用户裁的是"最重要的一块"（多半在正中间），程序再裁时也只能取中间，不能自作主张偏上或偏下。
+     * 两种极端都各有一半会被裁掉，取"能取到的最大的那一块"（也就是只裁一条边）。
+     * 比例一致时（用户按裁剪框裁出来的图）这个矩形恰好**等于整张源图** → 一个像素都不裁，
+     * 宿主那边也就什么都不用做。
      *
      * 取整用 `Math.round`（四舍五入）：居中偏移 `(src − 窗口) ÷ 2` 在奇数差额上本来就该四舍五入，
      * `x.toFloat().toInt()`（截断）会稳定地少 1px —— 1px 肉眼看不出来，但用户会拿截图取像素核对，
@@ -132,55 +150,33 @@ internal object PhotoFit {
     fun centerWindow(srcW: Int, srcH: Int, targetW: Int, targetH: Int): Window? {
         if (srcW <= 0 || srcH <= 0 || targetW <= 0 || targetH <= 0) return null
         val r = targetW.toFloat() / targetH.toFloat()
-        val byW = Math.round(srcH.toFloat() * r).coerceAtLeast(1)   // 上下摊开时该有多宽
-        val byH = Math.round(srcW.toFloat() / r).coerceAtLeast(1)   // 左右摊开时该有多高
-        val w = minOf(srcW, byW)
-        val h = minOf(srcH, byH)
-        val freeX = (srcW - w).coerceAtLeast(0)
-        val freeY = (srcH - h).coerceAtLeast(0)
-        return Window(w, h, Math.round(freeX * 0.5f), Math.round(freeY * 0.5f))
+        return if (fitsWhole(srcW, srcH, targetW, targetH)) {
+            // 图比框更宽（或同比例）：保住整高，左右各裁一条
+            val w = minOf(srcW, Math.round(srcH.toFloat() * r).coerceAtLeast(1))
+            Window(w, srcH, Math.round((srcW - w) * 0.5f), 0)
+        } else {
+            // 图比框更高/更窄：保住整宽，上下各裁一条
+            val h = minOf(srcH, Math.round(srcW.toFloat() / r).coerceAtLeast(1))
+            Window(srcW, h, 0, Math.round((srcH - h) * 0.5f))
+        }
     }
 
     /**
-     * 纯函数（可单测）：**放得下**时产出的位图尺寸。
-     *
-     * 宽度取框宽（所以宿主缩放因子恒为 1），高度按图自身比例算，并且**不许超过框高**
-     * （越过了就不再是"放得下"）。`fitsWhole` 成立时 `round(框宽 × 图高 / 图宽) ≤ 框高 + 半个像素`，
-     * 这里再 `coerceIn(1, 框高)` 兜住那半个像素的取整误差 —— 它只会让留边少 1px，不会让图被裁。
-     */
-    fun wholeSize(srcW: Int, srcH: Int, targetW: Int, targetH: Int): IntArray? {
-        if (srcW <= 0 || srcH <= 0 || targetW <= 0 || targetH <= 0) return null
-        val h = Math.round(targetW.toDouble() * srcH.toDouble() / srcW.toDouble())
-            .toInt()
-            .coerceIn(1, targetH)
-        return intArrayOf(targetW, h)
-    }
-
-    /**
-     * 纯函数（可单测）：这一次渲染的完整结论（[Layout]）—— 上面的分支判据 + 两条产出路径。
+     * 纯函数（可单测）：这一次渲染的完整结论（[Layout]）—— 上面那条唯一的规则。
      *
      * 这是渲染链路上**唯一**决定"裁哪一块、缩到多大"的地方（[PhotoBitmap.decode] 只负责
-     * 把这里的算术喂给 Bitmap 工厂），所以"空间够就完整显示、不够就取中间"这件事
-     * 能在一个纯函数上被穷举验证。
+     * 把这里的算术喂给 Bitmap 工厂），所以"填满框、比例一致就整张显示、不一致就居中取一块"
+     * 这件事能在一个纯函数上被穷举验证。
+     *
+     * 产出**逐值等于框**：宿主端 `fitCenter` 于是是恒等变换（不缩放、不裁剪、不留边）。
      */
     fun layout(srcW: Int, srcH: Int, targetW: Int, targetH: Int): Layout? {
         if (srcW <= 0 || srcH <= 0 || targetW <= 0 || targetH <= 0) return null
-        if (fitsWhole(srcW, srcH, targetW, targetH)) {
-            val size = wholeSize(srcW, srcH, targetW, targetH) ?: return null
-            // 整张图都在（窗口 = 整张源图），一个像素都不裁
-            return Layout(
-                whole = true,
-                window = Window(srcW, srcH, 0, 0),
-                outWidth = size[0],
-                outHeight = size[1],
-                targetW = targetW,
-                targetH = targetH
-            )
-        }
         val window = centerWindow(srcW, srcH, targetW, targetH) ?: return null
-        // 产出的宽高**逐值等于框**：宿主端 fitCenter 于是是恒等变换（不缩放、不裁剪）
+        // 窗口 = 整张源图 ⟺ 比例一致（取整误差之内）→ 日志写"完整显示"；否则"取中间块"。
+        // 注意这里**不是**上一版的"放得下"：产出永远等于框，没有留边那一档了。
         return Layout(
-            whole = false,
+            whole = window.width >= srcW && window.height >= srcH,
             window = window,
             outWidth = targetW,
             outHeight = targetH,
