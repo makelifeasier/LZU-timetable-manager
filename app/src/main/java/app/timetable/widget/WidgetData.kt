@@ -92,6 +92,9 @@ internal object WidgetData {
     /** widget_today_info.xml 里声明的 minHeight（默认摆放尺寸） */
     const val DECLARED_MIN_HEIGHT_DP = 150
 
+    /** widget_today_info.xml 里声明的 minWidth（默认摆放宽度） */
+    const val DECLARED_MIN_WIDTH_DP = 150
+
     /** widget_today_info.xml 里声明的 minResizeHeight（能被缩到多小） */
     const val DECLARED_MIN_RESIZE_HEIGHT_DP = 90
 
@@ -336,19 +339,49 @@ internal object WidgetData {
     }
 
     /**
-     * 图片框高度（dp）。
+     * 图片框的**内容宽度**（dp）= 系统回报的格子宽度 − 根布局左右内边距。
      *
-     * 按小组件的**宽高比**自适应：宽扁时做成接近方形，竖长时做成长方形 ——
-     * 这样在两种极端尺寸下都不会出现"一张细长条图"或"图把课程挤没"。
+     * 用来算"该把图解码成多少像素"（见 [PhotoBitmap.targetPx]）：按格子宽度解码会多解 24dp×density
+     * 那么多列像素 —— 那些像素宿主根本不会显示，却要跟着 RemoteViews 一起过 binder。
+     *
+     * 取不到尺寸时按声明的 minWidth 估（只影响清晰度，不影响功能）。
+     */
+    fun contentWidthDp(context: Context): Int {
+        val opts = widgetOptions(context) ?: return DECLARED_MIN_WIDTH_DP - CONTENT_INSET_DP
+        val w = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
+        if (w <= 0) return DECLARED_MIN_WIDTH_DP - CONTENT_INSET_DP
+        return (w - CONTENT_INSET_DP).coerceAtLeast(1)
+    }
+
+    /**
+     * 图片框的**理想**高度（dp）—— 注意是"理想"，最终给多高由 [ExtrasPlanner] 按真实余量裁。
+     *
+     * 按小组件的宽高比自适应：竖长时做高一点，宽扁时做矮一点（优先保住课程行）。
      */
     fun photoHeightDp(context: Context): Int {
         val opts = widgetOptions(context) ?: return PHOTO_MIN_DP
-        val w = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH)
-        val h = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
-        if (w <= 0 || h <= 0) return PHOTO_MIN_DP
-        // 竖长（高一倍以上）：图更高；宽扁：图矮一点，优先保住课程行
-        val ratio = if (h >= w) 1.15f else 0.72f
-        return (w * ratio).toInt().coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
+        return photoHeightDpFor(
+            opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH),
+            opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT)
+        )
+    }
+
+    /**
+     * 纯函数（可单测）：由小组件的**格子**宽高（dp）算出图片框的理想高度。
+     *
+     * **按内容宽度算，不是格子宽度**：小组件根布局左右各有 12dp 内边距（`widget_today.xml`），
+     * 图片框自己只有 `match_parent` 的**内容宽度**。以前拿格子宽度 `w` 直接乘比例，
+     * 等于按"比实际宽 24dp 的框"算高度 —— 在窄组件上会把图片框算成一个**近乎正方形的块**
+     * （真机反馈里的"右边一个近似正方形的块"就有它一份：126dp 内容宽 × 150dp 高）。
+     * 扣掉内边距之后，"宽扁→接近方形、竖长→长方形"这个意图才真的成立。
+     *
+     * 取不到尺寸（部分启动器不上报）时给 [PHOTO_MIN_DP]，属于"宁可小一点也别乱猜"。
+     */
+    fun photoHeightDpFor(widthDp: Int, heightDp: Int): Int {
+        if (widthDp <= 0 || heightDp <= 0) return PHOTO_MIN_DP
+        val contentDp = (widthDp - CONTENT_INSET_DP).coerceAtLeast(1)
+        val ratio = if (heightDp >= widthDp) 1.15f else 0.72f
+        return (contentDp * ratio).toInt().coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
     }
 
     /** 当前小组件的 options（取不到返回 null） */
@@ -363,6 +396,31 @@ internal object WidgetData {
 
     /** 列表下方的扩展区最少需要多少 dp 才显示（一句话约 20dp，图片更多） */
     const val EXTRA_MIN_DP = 22
+
+    /**
+     * 图片框与每日一句的 `layout_marginTop`（dp）。
+     *
+     * 布局里写死 6dp，必须算进"余量"里 —— 只算控件高度不算边距，累计起来正好会把
+     * 最后一块挤出去几个 dp（表现就是"图片下沿被裁掉一条"）。
+     */
+    const val AREA_GAP_DP = 6
+
+    /**
+     * 图片框的**硬底线**高度（dp）：低于它就不算"一张图"了，宁可退成一句话。
+     *
+     * 为什么不是 [PHOTO_MIN_DP]（56）：56 是"按宽高比算出来的理想值不会低于它"，
+     * 属于**好看**的下限；而"能不能显示"是另一回事 —— 真机上小组件上报的余量常常只有 20~40dp，
+     * 拿 56 当显示门槛，用户开了图片反而永远看不到（把"看得见但扁"变成了"看不见"）。
+     */
+    const val PHOTO_HARD_MIN_DP = 32
+
+    /**
+     * 小组件根布局的左右内边距合计（dp）：`widget_today.xml` 里 paddingStart/End 各 12dp。
+     *
+     * 图片框宽度是 `match_parent`，也就是**内容宽度**；算宽高比时得用内容宽度。
+     * 这个常量与布局必须同步改（单测 [app.timetable.widget.WidgetExtrasPlanTest] 会读 XML 核对）。
+     */
+    const val CONTENT_INSET_DP = 24
 
     /** 图片框的最小/最大高度（dp） */
     const val PHOTO_MIN_DP = 56

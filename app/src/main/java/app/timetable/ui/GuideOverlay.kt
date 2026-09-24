@@ -99,6 +99,17 @@ internal object GuideOverlay {
             onFinish()
         }
 
+        /**
+         * 重新计算"洞"与卡片的位置。
+         *
+         * 每次全局布局都会重跑一次：引导弹出时页面往往**还没排完版**
+         * （课表刚拿到数据、列表刚量好高度），只在弹出那一帧算一次位置的话，
+         * 高亮框会停在上一帧的坐标上 —— 看起来就是"框框错了地方"。
+         *
+         * 这里必须**幂等**：函数自己会 requestLayout，而 requestLayout 又会触发
+         * 一次全局布局回调，不做收敛判断就会自激成死循环。所以位置一模一样时直接返回。
+         */
+        var lastKey = ""
         fun layoutStep() {
             val step = steps[index]
             val target = runCatching { step.anchor() }.getOrNull()
@@ -151,10 +162,19 @@ internal object GuideOverlay {
             } else {
                 (hole[1] - gap - cardH).coerceAtLeast(side)
             }
+            // 卡片必须整块留在屏幕内：放目标下方/上方都不够时，贴底但要留出边距，
+            // 否则会被导航栏盖住（用户就点不到「下一步」了）
+            val clamped = y.coerceAtMost((hostH - side - cardH).coerceAtLeast(side))
+
+            // 收敛判断：算出来的位置和上一次完全一样就什么都不做（见上面的注释）
+            val key = "${hole[0]},${hole[1]},${hole[2]},${hole[3]},$clamped,$cardH,$hostW,$hostH"
+            if (key == lastKey) return
+            lastKey = key
+
             (card.layoutParams as FrameLayout.LayoutParams).apply {
                 leftMargin = side
                 rightMargin = side
-                topMargin = y
+                topMargin = clamped
                 width = hostW - side * 2
             }
             card.requestLayout()
@@ -165,6 +185,7 @@ internal object GuideOverlay {
         val body = card.findViewWithTag<TextView>(TAG_BODY)
         val dots = card.findViewWithTag<TextView>(TAG_DOTS)
         val primary = card.findViewWithTag<TextView>(TAG_PRIMARY)
+        val back = card.findViewWithTag<TextView>(TAG_BACK)
 
         fun paint() {
             val step = steps[index]
@@ -172,26 +193,31 @@ internal object GuideOverlay {
             body.text = step.body
             dots.text = steps.indices.joinToString(" ") { if (it == index) "●" else "○" }
             primary.text = if (index == steps.lastIndex) "知道了" else "下一步"
+            // 第一步没有"上一步"，这时候隐藏比置灰更省事：置灰的按钮看起来像出错
+            back.visibility = if (index == 0) View.INVISIBLE else View.VISIBLE
             layoutStep()
         }
 
-        hostView.setOnClickListener {
-            if (index < steps.lastIndex) {
-                index++
-                paint()
-            } else {
-                finish()
-            }
+        // 注意：局部函数在 Kotlin 里必须"先声明后使用"，所以 goTo 放在 paint 后面
+        fun goTo(next: Int) {
+            val target = next.coerceIn(0, steps.lastIndex)
+            if (target == index) return
+            index = target
+            paint()
         }
+
+        // 点卡片之外的区域**只拦截、不推进**。
+        // 之前是"点哪儿都下一步"，用户反馈很容易误触翻页（想看清楚的步骤被自己点掉了）。
+        // 现在只有下面两个按钮能推进，遮罩只负责"别让点击漏到下面的真实界面"。
+        hostView.setOnClickListener { /* 故意什么都不做 */ }
         primary.setOnClickListener {
-            if (index < steps.lastIndex) {
-                index++
-                paint()
-            } else {
-                finish()
-            }
+            if (index < steps.lastIndex) goTo(index + 1) else finish()
         }
+        back.setOnClickListener { goTo(index - 1) }
         card.findViewWithTag<TextView>(TAG_SKIP)?.setOnClickListener { finish() }
+
+        // 页面每重新布局一次就重算位置（引导弹出时页面往往还没排完版）
+        hostView.viewTreeObserver.addOnGlobalLayoutListener { layoutStep() }
 
         content.addView(hostView)
         // 宽高要等一次布局才准，所以第一帧之后再做定位
@@ -211,6 +237,7 @@ internal object GuideOverlay {
     private const val TAG_BODY = "guide_body"
     private const val TAG_DOTS = "guide_dots"
     private const val TAG_PRIMARY = "guide_primary"
+    private const val TAG_BACK = "guide_back"
     private const val TAG_SKIP = "guide_skip"
 
     private fun buildCard(activity: Activity): LinearLayout {
@@ -268,17 +295,38 @@ internal object GuideOverlay {
                         },
                         LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                     )
+                    // 上一步：只有第一步不显示（用户反馈"没有上一步"）
+                    addView(
+                        TextView(ctx).apply {
+                            tag = TAG_BACK
+                            text = "上一步"
+                            textSize = 14f
+                            gravity = Gravity.CENTER
+                            setTextColor(ctx.getColor(R.color.text_secondary))
+                            background = ctx.getDrawable(R.drawable.bg_pill)
+                            setPadding(
+                                Ui.dp(ctx, 14f), Ui.dp(ctx, 9f),
+                                Ui.dp(ctx, 14f), Ui.dp(ctx, 9f)
+                            )
+                            isClickable = true
+                        },
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply { marginEnd = Ui.dp(ctx, 8f) }
+                    )
                     addView(
                         TextView(ctx).apply {
                             tag = TAG_PRIMARY
-                            textSize = 14f
+                            textSize = 15f
                             typeface = Typeface.DEFAULT_BOLD
                             gravity = Gravity.CENTER
                             setTextColor(ctx.getColor(R.color.page_bg))
-                            background = ctx.getDrawable(R.drawable.bg_accent_chip)
+                            // 实心强调色：淡色底会被看成"禁用状态"（用户反馈"按钮不亮"）
+                            background = ctx.getDrawable(R.drawable.bg_btn_primary)
                             setPadding(
-                                Ui.dp(ctx, 18f), Ui.dp(ctx, 9f),
-                                Ui.dp(ctx, 18f), Ui.dp(ctx, 9f)
+                                Ui.dp(ctx, 22f), Ui.dp(ctx, 10f),
+                                Ui.dp(ctx, 22f), Ui.dp(ctx, 10f)
                             )
                             isClickable = true
                         }

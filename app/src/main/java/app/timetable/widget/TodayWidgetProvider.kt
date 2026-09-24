@@ -1,4 +1,4 @@
-﻿package app.timetable.widget
+package app.timetable.widget
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -117,8 +117,13 @@ class TodayWidgetProvider : AppWidgetProvider() {
             views.setTextColor(R.id.widget_refresh, colors.accent)
             views.setTextColor(R.id.widget_empty, colors.sub)
             views.setTextColor(R.id.widget_footer, colors.sub)
-            // 图标是纯白矢量，用 setColorFilter 上成强调色
-            runCatching { views.setInt(R.id.widget_mode, "setColorFilter", colors.accent) }
+            // 模式切换按钮：显示"现在看的是哪一种"，点一下切到另一种。
+            // （以前是纯图标 + setColorFilter，用户看不懂那是什么 —— 见布局里的注释）
+            val modeIsToday = Prefs.widgetMode == WidgetData.MODE_TODAY
+            runCatching {
+                views.setTextViewText(R.id.widget_mode, if (modeIsToday) "整天 ▾" else "接下来 ▾")
+                views.setTextColor(R.id.widget_mode, colors.accent)
+            }
 
             // 列表数据由服务提供（可滚动）
             views.setRemoteAdapter(

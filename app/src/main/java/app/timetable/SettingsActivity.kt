@@ -714,12 +714,39 @@ class SettingsActivity : BaseActivity() {
                         LinearLayout.LayoutParams.WRAP_CONTENT
                     ).apply {
                         marginStart = dp(16); marginEnd = dp(16)
-                        topMargin = dp(6); bottomMargin = dp(14)
+                        topMargin = dp(6); bottomMargin = dp(6)
                     }
+                }
+            )
+            // 日历上只有一个个小圆点，用户看不出那天到底是什么节 —— 而"点某天"这个交互
+            // 是没人会主动去试的。所以把这一年有哪几天、分别是什么节直接列在下面：
+            // 一眼能看到名字，想细看再点日历上的某天。
+            val hits = Holidays.all(today().year).filter { (_, h) ->
+                when (h.kind) {
+                    Holidays.Kind.SOLAR -> Prefs.greetSolar
+                    Holidays.Kind.LUNAR -> Prefs.greetLunar
+                    Holidays.Kind.SCHOOL -> Prefs.greetSchool
+                }
+            }
+            val listText = if (hits.isEmpty()) {
+                "上面三类都关着，所以日历上没有圆点。打开任意一类，这里会列出具体节日。"
+            } else {
+                hits.joinToString("   ") { (d, h) -> "${d.monthValue}/${d.dayOfMonth} ${h.name}" }
+            }
+            addView(
+                TextView(this@SettingsActivity).apply {
+                    text = listText
+                    textSize = 12.5f
+                    setTextColor(color(R.color.text_secondary))
+                    setLineSpacing(dp(3).toFloat(), 1f)
+                    setPadding(dp(16), dp(4), dp(16), dp(14))
                 }
             )
         }
     }
+
+    /** 当前年份（抽出来是为了上面那段读起来不用再 import 一堆东西） */
+    private fun today(): LocalDate = LocalDate.now()
 
     /** 点日历上的某天：列出当天的节日（只看已启用的类别） */
     private fun showDayHolidays(date: LocalDate) {

@@ -2,6 +2,7 @@ package app.timetable.debug
 
 import android.appwidget.AppWidgetManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -66,6 +67,8 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_STYLECHECK -> styleCheck(context)
                 ACTION_FEATURECHECK -> featureCheck(context)
                 ACTION_SEED -> seedData(context)
+                ACTION_PHOTOSEED -> photoSeed(context)
+                ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_GREETCHECK -> greetCheck(context)
                 else -> widgetSelfCheck(context)
             }
@@ -629,6 +632,71 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         null
     }
 
+    /**
+     * 造一张图放进小组件图片目录，并打开"图片 + 每日一句"两个开关。
+     *
+     * 为什么要在 App 里生成而不是 `adb push`：图片必须是**我们自己的包目录**下的文件，
+     * 才能复现"启动器跨进程读私有文件"这条路径；生成比 push + chmod 可靠得多。
+     */
+    private fun photoSeed(context: Context) {
+        try {
+            Prefs.init(context)
+            val dir = java.io.File(context.filesDir, "photos").apply { mkdirs() }
+            val f = java.io.File(dir, "seed.jpg")
+            val bmp = Bitmap.createBitmap(600, 400, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.drawColor(0xFF1E6FD9.toInt())
+            canvas.drawText(
+                "PHOTO",
+                140f,
+                230f,
+                android.graphics.Paint().apply {
+                    color = 0xFFFFFFFF.toInt()
+                    textSize = 96f
+                    isFakeBoldText = true
+                }
+            )
+            java.io.FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            bmp.recycle()
+
+            // photoUris 存的是**绝对路径**，每行一个（见 WidgetPhotos）
+            Prefs.photoUris = f.absolutePath
+            Prefs.photoEnabled = true
+            Prefs.quoteEnabled = true
+            // 「强制显示」= 跳过余量判断。自检的小组件往往被系统压在很小的尺寸上，
+            // 自动档会因为"真的放不下"而合理隐藏，那样就测不到渲染链路了。
+            Prefs.widgetExtrasOverride = 1
+            TodayWidgetProvider.refreshAll(context)
+            Log.i(
+                TAG,
+                "PHOTOSEED 已生成 ${f.absolutePath} (${f.length()} 字节) " +
+                    "photoEnabled=${Prefs.photoEnabled} quoteEnabled=${Prefs.quoteEnabled} " +
+                    "photoList=${WidgetData.photoList(context)}"
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "PHOTOSEED RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    /**
+     * 把小组件真的**放到桌面上**。
+     *
+     * 为什么非做不可：小组件的图片是由**启动器进程**去读取的，而自检是在我们自己的进程里
+     * inflate 的 —— 同一个 uid 读自己私有目录当然成功，所以"自检通过"完全掩盖了
+     * "启动器读不到"这类问题（图片一直空白就是这么漏掉的）。
+     * 只有真的钉到桌面上，才能看到宿主进程来取图时的真实调用方 uid。
+     */
+    private fun pinWidget(context: Context) {
+        try {
+            val mgr = AppWidgetManager.getInstance(context)
+            val provider = ComponentName(context, TodayWidgetProvider::class.java)
+            val ok = mgr.requestPinAppWidget(provider, null, null)
+            Log.i(TAG, "PINWIDGET requestPinAppWidget 返回=$ok（true 后系统会弹确认框，需要点一下「添加」）")
+        } catch (t: Throwable) {
+            Log.i(TAG, "PINWIDGET RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
     // --------------------------------------------------------- 明文策略自检
 
     private fun probeCleartext(context: Context, url: String) {
@@ -684,6 +752,8 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_STYLECHECK = "app.timetable.debug.STYLECHECK"
         const val ACTION_FEATURECHECK = "app.timetable.debug.FEATURECHECK"
         const val ACTION_SEED = "app.timetable.debug.SEED"
+        const val ACTION_PHOTOSEED = "app.timetable.debug.PHOTOSEED"
+        const val ACTION_PINWIDGET = "app.timetable.debug.PINWIDGET"
         const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"
 

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  主要动作按钮（实心强调色）。
+
+  为什么不能复用 bg_accent_chip：那是给"选中态的小标签"用的**淡色底**，
+  把「下一步」这种主要按钮放在淡底上会被看成禁用状态（用户反馈原话："下一步按钮不亮"）。
+  这个 drawable 是不透明的强调色实心圆角，文字用 page_bg 反色 ——
+  浅色模式下是白字蓝底，深色模式下是黑字浅蓝底，两边对比度都够。
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@color/accent" />
+    <corners android:radius="999dp" />
+</shape>

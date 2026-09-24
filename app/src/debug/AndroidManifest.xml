@@ -22,6 +22,8 @@
                 <action android:name="app.timetable.debug.STYLECHECK" />
                 <action android:name="app.timetable.debug.FEATURECHECK" />
                 <action android:name="app.timetable.debug.SEED" />
+                <action android:name="app.timetable.debug.PHOTOSEED" />
+                <action android:name="app.timetable.debug.PINWIDGET" />
                 <action android:name="app.timetable.debug.GREETCHECK" />
             </intent-filter>
         </receiver>
