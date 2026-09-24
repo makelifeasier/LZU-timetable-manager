@@ -44,14 +44,18 @@ internal class ExtrasPlan(
  * - `1` 强制显示：**跳过余量判断**（少数机型上报的高度根本是错的，按它算必然是"显示不出来"），
  *   按理想尺寸把开着的都摆上去。放不下的部分交给系统裁 —— 这是用户自己选的档位。
  *
- * ## 本轮（删掉图片轮播之后）语义上的一个变化
+ * ## 本轮：预算里不再有"图片能长多高"这回事
  *
- * 以前"行数先按整个高度算完，剩下的零头再看够不够放图"，于是零头常常只有几个 dp ——
- * 用户开了图片却什么也看不见。现在算行数时**先把图片预留扣掉**（[WidgetData.rowsFor] 的
- * `reserveDp`），所以传进来的 [plan] 的 `availableDp` 天然含着一块图片的高度：
- * 只要行数算得出来、格子不是被压到最小尺寸，图片就一定会显示。
- * 另外 [plan] 的 `idealPhotoDp` 现在也应传[WidgetData.photoBoxTargetDp]（"这次框实际能有多高"），
- * 而不是固定的 16:9 理想值 —— 多出来的、不够一整行的零头就是靠它归到图片上的。
+ * 传进来的 [plan] 的 `availableDp` 里天然含着一块图片的高度（算行数时**先把图片预留扣掉**，
+ * 见 [WidgetData.rowsFor] 的 `reserveDp`），而那块预留现在恒等于"照片自己要的框高 + 6dp"。
+ * 于是：
+ *  - 空间**比照片需要的多** → 框就取照片要的那个高度，多出来的高度在上一层的行数计算里
+ *    已经变成整行课程了（本次修复的就是这一档）；
+ *  - 空间**比照片需要的少** → 在这里夹到可用高度，再交给 [PhotoFit.layout] 居中取一块。
+ *
+ * 上一轮这里写的是"idealPhotoDp 应传 photoBoxTargetDp（这次框实际能有多高）"，
+ * 也就是"能塞多高塞多高"；那正是"下拉组件 → 图片不变、下边流出一大片空白"的来源，
+ * 已经整条改掉（见 [WidgetData.photoWantedHeightDp] 里的账）。不要改回去。
  */
 internal object ExtrasPlanner {
 
@@ -62,8 +66,12 @@ internal object ExtrasPlanner {
      * @param photoCount     实际存在的图片张数（0 张等于没开）
      * @param availableDp    列表下方的真实余量（[WidgetData.extraSpaceDp]）。**图片开着时它已经
      *                       包含给图片预留的那一块**（见 [WidgetData.photoReserveDp]）
-     * @param idealPhotoDp   这次图片框**实际**能有多高（[WidgetData.photoBoxTargetDp]）；
-     *                       不再是"按宽高比算出来的固定理想值"，那样多出来的零头就浪费了
+     * @param wantedPhotoDp  **照片自己要的框高**（[WidgetData.photoBoxTargetDp]）。注意传进来的是
+     *                       "照片需要多高"，不是"空间能给我多高" —— 后者正是本次修的病，
+     *                       见 [WidgetData.photoWantedHeightDp] 里 4×2 变 4×3 那段账。
+     *                       空间不够时由本函数统一降到可用高度（下面 photoRoom 那两处夹取），
+     *                       再交给 [PhotoFit.layout] 走"取中间块"的兜底分支 —— 也就是"框比照片扁"
+     *                       那一档，行为与本轮改动之前完全一致。
      * @param quoteCostDp    一句话的占用（含它自己的 6dp 上边距）
      * @param minPhotoDp     图片框的**硬底线**：低于这个高度就不是"一张图"而是一条彩条了
      * @param gapDp          图片框的 6dp 上边距（布局里写死的，必须算进预算）
@@ -74,7 +82,7 @@ internal object ExtrasPlanner {
         photoEnabled: Boolean,
         photoCount: Int,
         availableDp: Int,
-        idealPhotoDp: Int,
+        wantedPhotoDp: Int,
         quoteCostDp: Int = WidgetData.EXTRA_MIN_DP,
         minPhotoDp: Int = WidgetData.PHOTO_HARD_MIN_DP,
         gapDp: Int = WidgetData.AREA_GAP_DP
@@ -86,13 +94,20 @@ internal object ExtrasPlanner {
         // -1：用户明确要求隐藏（Settings 里的「强制隐藏」）
         if (override < 0) return ExtrasPlan(false, 0, false)
 
-        // +1：强制显示。仍然不要超过"理想高度"，但允许用掉余量之外的 22dp
+        // 照片自己要的高度必须落在硬底线之上。**上限就是它自己** —— 框不再"能塞多高塞多高"：
+        // 多给出来的高度对照片毫无用处（照片按自己的比例显示，多出来的部分全是留白底色），
+        // 那些高度该由调用方还给课程列表（见 WidgetData.photoWantedHeightDp）。
+        // 这一行是本次改动最核心的一处：老代码这里传进来的是 `photoBoxTargetDp(余量, 宽)`，
+        // 也就是"空间能给我多高"，于是 4×3 下拉出来的那 63dp 全变成了照片上下的空白。
+        val wanted = wantedPhotoDp.coerceAtLeast(minPhotoDp)
+
+        // +1：强制显示。仍然不要超过"照片要的高度"，但允许用掉余量之外的 22dp
         //（老代码就是 `ideal.coerceAtMost(space + EXTRA_MIN_DP)`，这里保持同样的宽松度，
         // 免得真要救的机型反而比之前显示得更小）
         if (override > 0) {
             if (!wantPhoto) return ExtrasPlan(false, 0, wantQuote)
             val room = maxOf(avail + quoteCostDp, gapDp + minPhotoDp)
-            return ExtrasPlan(true, idealPhotoDp.coerceIn(minPhotoDp, room), wantQuote)
+            return ExtrasPlan(true, wanted.coerceIn(minPhotoDp, room), wantQuote)
         }
 
         // 0：自动。没开图片就只剩句子这一件事
@@ -107,16 +122,16 @@ internal object ExtrasPlanner {
             return ExtrasPlan(false, 0, wantQuote && avail >= quoteCostDp)
         }
         if (!wantQuote) {
-            return ExtrasPlan(true, idealPhotoDp.coerceIn(minPhotoDp, photoRoom), false)
+            return ExtrasPlan(true, wanted.coerceIn(minPhotoDp, photoRoom), false)
         }
 
         // 两个都开：从同一个预算里先扣句子的份额，再看图片还剩多少
         val roomForBoth = (avail - quoteCostDp - gapDp).coerceAtLeast(0)
         return if (roomForBoth >= minPhotoDp) {
-            ExtrasPlan(true, idealPhotoDp.coerceIn(minPhotoDp, roomForBoth), true)
+            ExtrasPlan(true, wanted.coerceIn(minPhotoDp, roomForBoth), true)
         } else {
             // 放不下两个 → 保图片、弃句子（理由见类注释第 2 条）
-            ExtrasPlan(true, idealPhotoDp.coerceIn(minPhotoDp, photoRoom), false)
+            ExtrasPlan(true, wanted.coerceIn(minPhotoDp, photoRoom), false)
         }
     }
 }

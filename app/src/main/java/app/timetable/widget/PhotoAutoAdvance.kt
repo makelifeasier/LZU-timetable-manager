@@ -180,7 +180,14 @@ internal object PhotoAutoAdvance {
             Log.i(
                 TAG,
                 "自动换图 → 第 ${at + 1}/${photos.size} 张（局部刷新）" +
-                    PhotoBitmap.renderLabel(render, frame, contentDp, boxDp) +
+                    PhotoBitmap.renderLabel(
+                        render = render,
+                        frame = frame,
+                        boxWidthDp = contentDp,
+                        boxHeightDp = boxDp,
+                        wantedHeightDp = WidgetData.photoWantedHeightDp(app),
+                        rows = WidgetData.visibleRows(app)
+                    ) +
                     " set=ok(partial)"
             )
         }

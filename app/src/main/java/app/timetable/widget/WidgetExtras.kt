@@ -21,8 +21,11 @@ import java.io.File
  *    `AdapterViewFlipper`：它是个可滚动的 AdapterView，会吃掉竖直手势，
  *    课程列表就滑不动了（"自动轮播启动后小组件无法使用"）。现在图片区永远是同一个
  *    ImageView，**点一下换下一张**（[TodayWidgetProvider.ACTION_NEXT_PHOTO]）。
- * 2. **图片框高度不再是固定的"理想值"**，而是"列表下方真实剩下的高度"
- *    （[WidgetData.photoBoxTargetDp]）：向下/向右拉组件，多出来的零头全部落在图片上。
+ * 2. **图片框高度不再由"列表下方剩多少"决定**，而是由**照片自己的比例**决定
+ *    （[WidgetData.photoWantedHeightDp]）：框刚好装下照片，多出来的高度交给课程列表
+ *    （多显示几整行课）。老做法是"剩多少就用多少"（[WidgetData.photoBoxTargetDp]），
+ *    结果下拉组件时照片比例没变、框却变高 → 照片完整显示 + 上下各留一大段空白
+ *    （真机日志里的"留边=74px(28%)"）。那段账写在 [WidgetData.photoWantedHeightDp] 里，别改回去。
  * 3. **位图不再交给宿主缩放或裁剪**：解码尺寸就是框的像素尺寸（[PhotoBitmap.targetPx]）。
  * 4. 上一轮加过"显示方式 / 裁哪一段 / 放大倍数"三个用户开关。用户否掉了：
  *    「我不是要你有显示倍率，而是导入图片的时候可以自己裁剪」。于是这一轮改成：
@@ -56,15 +59,22 @@ internal object WidgetExtras {
         Prefs.init(context)
         val space = WidgetData.extraSpaceDp(context)
         val contentDp = WidgetData.contentWidthDp(context)
+        // 比例只取一处：照片列表第一张（见 PhotoBitmap.photoAspect）。
+        // 排行数（WidgetData.photoReserveDp）与这里算框高用的是同一个输入，
+        // 否则"预留的高度"与"框实际的高度"会差出一截，底部又开始漏空白。
+        val aspect = PhotoBitmap.photoAspect(context)
         return ExtrasPlanner.plan(
             override = Prefs.widgetExtrasOverride,
             quoteEnabled = Prefs.quoteEnabled,
             photoEnabled = Prefs.photoEnabled,
             photoCount = photos(context).size,
             availableDp = space,
-            // 这里给的是"这次框**实际**能有多高"，而不是固定的理想高度：
-            // 余量里除了给图片预留的那一块，还带着不足一整行的零头，那些零头归图片
-            idealPhotoDp = WidgetData.photoBoxTargetDp(space, contentDp)
+            // 这里给的是"**照片需要**多高"（比例 × 内容宽度，夹在 56..150dp），
+            // 而不是"这次框能有多高"。后者正是本次要修的病：框跟着剩余空间长高，
+            // 而照片比例没变 → 放得下 → 上下各留一大段空白（真机日志里的"留边=74px(28%)"）。
+            // 参数里的 space 现在不参与计算（见 photoBoxTargetDp 的注释），
+            // 传进来只是为了在调用点保留"它以前是按余量算的"这条线索。
+            wantedPhotoDp = WidgetData.photoBoxTargetDp(space, contentDp, aspect)
         )
     }
 
@@ -107,7 +117,9 @@ internal object WidgetExtras {
                 // 把"真正显示出来的那一张"写回下标：跳过了坏图，下一次点击才是真的下一张
                 PhotoCursor.remember(context, at)
 
-                // 高度只能用 setViewLayoutHeight 表达（布局里图片框是 0dp，位置与顺序由布局定）
+                // 高度只能用 setViewLayoutHeight 表达（布局里图片框是 0dp，位置与顺序由布局定）。
+                // 这个值 = 照片需要的高（空间不够时由 ExtrasPlanner 降到可用高度）——
+                // **不是**"列表下方剩多少"。后者会让框比照片高，多出来的部分就是上下留白。
                 runCatching {
                     views.setViewLayoutHeight(
                         R.id.widget_photo_area,
@@ -129,10 +141,23 @@ internal object WidgetExtras {
                 val set = runCatching {
                     views.setImageViewBitmap(R.id.widget_photo_image, render.bitmap)
                 }
+                // 这一行是"真机核对"用的唯一判据（用户看不到画面，只能拿截图取像素对数字）：
+                //   框=226x72dp 照片比例=3.14:1 需要的框高=72dp 留边=0px 行数=2 ...
+                // `框` 与 `需要的框高` 相等 = 框刚好装下照片（零留边）；`框` 更大 = 又回到了
+                // "框高由剩余空间定"的老病（下拉组件时下边一大片空白），见 WidgetData.photoWantedHeightDp。
                 Log.i(
                     TAG,
                     "扩展区 $plan 余量=${space}dp 图片=${photos.size}张 第 ${at + 1} 张 " +
-                        PhotoBitmap.renderLabel(render, frame, contentDp, plan.photoHeightDp) +
+                        PhotoBitmap.renderLabel(
+                            render = render,
+                            frame = frame,
+                            boxWidthDp = contentDp,
+                            boxHeightDp = plan.photoHeightDp,
+                            // "需要的框高"必须按**决定框高的那个比例**（第一张）算，
+                            // 不能按当前显示这张算 —— 否则日志里的不变量自己就破了
+                            wantedHeightDp = WidgetData.photoWantedHeightDp(context),
+                            rows = WidgetData.visibleRows(context)
+                        ) +
                         " set=${if (set.isSuccess) "ok" else "FAIL:${set.exceptionOrNull()?.javaClass?.simpleName}"}"
                 )
             }

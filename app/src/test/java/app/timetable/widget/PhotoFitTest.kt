@@ -284,23 +284,27 @@ class PhotoFitTest {
 
     @Test
     fun budgetSizeOnlyShrinksWhatReallyDoesNotFit() {
-        // 917×137 的 RGB_565 是 251,258 字节 ≤ 300KB → 一个像素都不动
+        // 917×137 的 RGB_565 是 251,258 字节，远在预算内 → 一个像素都不动
         val fits = PhotoFit.budgetSize(917, 137, PhotoBitmap.MAX_BITMAP_BYTES, 2)
         assertEquals(917, fits[0])
         assertEquals(137, fits[1])
 
-        // 真机事故那一档：同一张图被解码器给成了 ARGB_8888（4 字节/像素 = 502,516 字节）
-        // 按 2 字节估的预算完全挡不住它，这里必须按真实字节数缩
-        val argbBytes = 917L * 137L * 4L
-        assertTrue("这一档本来就超预算（否则这条测试是假绿）", argbBytes > PhotoBitmap.MAX_BITMAP_BYTES)
-        val shrunk = PhotoFit.budgetSize(917, 137, PhotoBitmap.MAX_BITMAP_BYTES, 4)
-        assertEquals(716, shrunk[0])
-        assertEquals(107, shrunk[1])
+        // 同一张图的 ARGB_8888（4 字节/像素 = 502,516 字节）：预算放宽到 600KB 之后它也能过，
+        // 这是有意的 —— 常见的大组件图需要 916×291×2 = 533KB，预算太紧会把图压小、宿主再放大就糊。
+        // 真正的第一道防线是"解码后强制 RGB_565"（把 4 字节/像素变回 2），这条只是最后一道兜底。
+        val argbSmall = 917L * 137L * 4L
         assertTrue(
-            "缩完之后必须真的过关：${shrunk[0]}x${shrunk[1]}",
-            shrunk[0].toLong() * shrunk[1].toLong() * 4 <= PhotoBitmap.MAX_BITMAP_BYTES
+            "600KB 预算下这一档应当能过（否则说明预算又被收紧了）",
+            argbSmall <= PhotoBitmap.MAX_BITMAP_BYTES
         )
-        assertTrue("比例不能压变形", Math.abs(shrunk[0].toFloat() / shrunk[1] - 917f / 137f) < 0.05f)
+
+        // 真·超预算那一档：1000×400 的 ARGB 是 1.6MB，必须按**真实字节数**等比缩
+        val shrunk = PhotoFit.budgetSize(1000, 400, PhotoBitmap.MAX_BITMAP_BYTES, 4)
+        assertTrue("缩完必须过关：${shrunk[0]}x${shrunk[1]}",
+            shrunk[0].toLong() * shrunk[1].toLong() * 4 <= PhotoBitmap.MAX_BITMAP_BYTES)
+        assertTrue("比例不能压变形",
+            Math.abs(shrunk[0].toFloat() / shrunk[1] - 1000f / 400f) < 0.05f)
+        assertTrue("确实缩了", shrunk[0] < 1000)
     }
 
     @Test
@@ -338,17 +342,74 @@ class PhotoFitTest {
             byteCount = 917 * 137 * 2,      // 251,258 = RGB_565 的真实字节数
             config = "RGB_565"
         )
-        val label = PhotoBitmap.renderLabel(facts, PhotoCrop.frame(349, 136), 349, 52)
+        val label = PhotoBitmap.renderLabel(
+            facts = facts,
+            frame = PhotoCrop.frame(349, 136),
+            boxWidthDp = 349,
+            boxHeightDp = 52,
+            // 这张竖屏截图自己"要"的框高：349 ÷ (1440/3587) = 869dp → 撞 150dp 上限。
+            // 也就是说这一张永远走"取中间块"（框不可能给它 150dp 以上的高度）
+            wantedHeightDp = WidgetData.photoWantedHeightDp(349, 1440f / 3587f),
+            rows = 1,
+            photoRatioLabel = PhotoBitmap.ratioLabel(1440, 3587)
+        )
         assertEquals(
-            "框=349x52dp 比例=6.71:1 裁剪框=349:136dp(2.57:1) 源=1440x3587(0.40:1) " +
-                "裁剪图=1440x215 取中间块 窗=1440x215@(0,1686) " +
+            "框=349x52dp 比例=6.71:1 照片比例=0.40:1 需要的框高=150dp " +
+                "裁剪框=349:136dp(2.57:1) 源=1440x3587(0.40:1) " +
+                "裁剪图=1440x215 取中间块 窗=1440x215@(0,1686) 行数=1 " +
                 "bitmap=917x137 byteCount=251258B(245KB) config=RGB_565",
             label
         )
-        // 这几个 token 是给用户（和以后的我）按图索骥用的，缺一列就少一个判据
-        for (token in listOf("框=", "比例=", "裁剪框=", "取中间块", "bitmap=", "byteCount=", "config=")) {
+        // 这几个 token 是给用户（和以后的我）按图索骥用的，缺一列就少一个判据。
+        // 注意"取中间块"这一档**没有** `留边=`（留边只属于"完整显示"那条分支，见 Layout.verdict）
+        for (token in listOf(
+            "框=", "比例=", "照片比例=", "需要的框高=", "裁剪框=", "取中间块",
+            "窗=", "行数=", "bitmap=", "byteCount=", "config="
+        )) {
             assertTrue("日志缺少 $token：$label", label.contains(token))
         }
+    }
+
+    /**
+     * 用户要拿来在真机上核对的那一行（原话："日志请保留形如
+     * `框=226x72dp 照片比例=3.14:1 需要的框高=72dp 留边=0px 行数=2` 的一行"）。
+     *
+     * 这一条把**零留边**这个结论与日志文本一起钉死：只要 `框 == 需要的框高`，就是"框刚好装下照片"，
+     * 而 `留边=0px` 是它的现象。真机上一旦看到 `需要的框高` 比 `框` 小，就是"框高又被按剩余空间算了"。
+     */
+    @Test
+    fun theLineTheUserAskedForIsExact() {
+        val aspect = 720f / 229f                                   // 3.14:1
+        val box = WidgetData.photoWantedHeightDp(226, aspect)      // 需要的框高 = 72dp
+        val target = PhotoBitmap.targetPx(226, box, 2.625f)        // 594×189px
+        val saved = PhotoCrop.encodeSize(PhotoCrop.frame(226, box), target[0])   // 720×229
+        val layout = PhotoFit.layout(saved[0], saved[1], target[0], target[1])!!
+        val facts = RenderFacts(layout, saved[0], saved[1], target[0], target[1], target[0] * target[1] * 2, "RGB_565")
+
+        val label = PhotoBitmap.renderLabel(
+            facts = facts,
+            frame = PhotoCrop.frame(226, box),
+            boxWidthDp = 226,
+            boxHeightDp = box,
+            wantedHeightDp = box,
+            rows = WidgetData.photoRowsFor(187, 226, 0, aspect),
+            photoRatioLabel = PhotoBitmap.ratioLabel(saved[0], saved[1])
+        )
+        assertEquals(
+            "框=226x72dp 比例=3.14:1 照片比例=3.14:1 需要的框高=72dp " +
+                "裁剪框=226:72dp(3.14:1) 源=720x229(3.14:1) " +
+                "裁剪图=720x229 完整显示 留边=0px(0%) 行数=1 " +
+                "bitmap=594x189 byteCount=224532B(219KB) config=RGB_565",
+            label
+        )
+        // 用户要的那几个字段必须原样出现（顺序也一样，方便拿真机日志逐字比对）。
+        // 注意实际日志里 `比例=`（**框**的比例）与 `照片比例=`（当前这张图的比例）各占一列 ——
+        // 用户示例里只写了后者，前者是既有的列，保留着才能一眼看出"框和图是不是同形"。
+        val wanted = listOf("框=226x72dp", "照片比例=3.14:1", "需要的框高=72dp", "留边=0px", "行数=1")
+        for (token in wanted) {
+            assertTrue("缺少用户要核对的那一段 $token：$label", label.contains(token))
+        }
+        assertTrue("用户示例里的那一段必须是连着的", label.startsWith("框=226x72dp 比例=3.14:1 照片比例=3.14:1 需要的框高=72dp "))
     }
 
     @Test
@@ -356,10 +417,19 @@ class PhotoFitTest {
         // 完整显示那一档：226:72 的裁剪图，框 226×72dp（594×189px）→ 零留边
         val l = PhotoFit.layout(720, 229, 594, 189)!!
         val facts = RenderFacts(l, 720, 229, 594, 189, 594 * 189 * 2, "RGB_565")
-        val label = PhotoBitmap.renderLabel(facts, PhotoCrop.frame(226, 72), 226, 72)
+        val label = PhotoBitmap.renderLabel(
+            facts = facts,
+            frame = PhotoCrop.frame(226, 72),
+            boxWidthDp = 226,
+            boxHeightDp = 72,
+            wantedHeightDp = WidgetData.photoWantedHeightDp(226, 720f / 229f),
+            rows = 1,
+            photoRatioLabel = PhotoBitmap.ratioLabel(720, 229)
+        )
         assertEquals(
-            "框=226x72dp 比例=3.14:1 裁剪框=226:72dp(3.14:1) 源=720x229(3.14:1) " +
-                "裁剪图=720x229 完整显示 留边=0px(0%) " +
+            "框=226x72dp 比例=3.14:1 照片比例=3.14:1 需要的框高=72dp " +
+                "裁剪框=226:72dp(3.14:1) 源=720x229(3.14:1) " +
+                "裁剪图=720x229 完整显示 留边=0px(0%) 行数=1 " +
                 "bitmap=594x189 byteCount=224532B(219KB) config=RGB_565",
             label
         )

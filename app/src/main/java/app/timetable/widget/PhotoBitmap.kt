@@ -60,13 +60,13 @@ internal object PhotoBitmap {
     /**
      * 单张图进 RemoteViews 的**真实字节**上限。
      *
-     * 为什么是 300KB 而不是 400KB：binder 事务上限约 1MB，而 RemoteViews 里除了这张位图
-     * 还有列表、文案、PendingIntent 等一堆指令，位图是按 Parcel 序列化过去的（还带一份头部）。
-     * 用户真机上一次 917×137 的图就已经因为 ARGB 变成 491KB —— 预算留得越松，
-     * "整次更新被系统丢掉"这种最难查的失败模式就越容易出现。300KB 对 917×137 的
-     * RGB_565（245KB）仍然够用（这也是实测最常见的框尺寸）。
+     * 为什么是 600KB：binder 事务上限约 1MB，而 RemoteViews 里除了这张位图还有列表、文案、
+     * PendingIntent 等指令（合计几十 KB）。**曾经压到 300KB，但那会把大组件上的图压小**：
+     * 真机实测框 349dp 宽（916px）的 3.14:1 图需要 916×291×2 = 533KB，300KB 直接把它缩成
+     * 694×221（再由宿主放大 → 变糊）。600KB 能让常见大图原尺寸过去，同时给
+     * "ARGB 意外翻倍"和"其余指令"都留了余量（真正的第一道防线是解码后强制 RGB_565）。
      */
-    const val MAX_BITMAP_BYTES = 300 * 1024
+    const val MAX_BITMAP_BYTES = 600 * 1024
 
     /** [Bitmap.Config.RGB_565] 每像素 2 字节 */
     const val BYTES_PER_PIXEL = 2
@@ -78,11 +78,11 @@ internal object PhotoBitmap {
      * 纯函数（可单测）：图片框要显示多大（dp）→ 该解码成多少像素。
      *
      * 这两个 dp 值就是**框的真实尺寸**（框宽 = [WidgetData.contentWidthDp]，
-     * 框高 = [WidgetData.photoBoxTargetDp] 经 [ExtrasPlanner] 分下来的结果），
-     * 所以解出来的位图与框**逐值同比例** —— 宿主那边什么裁剪也不需要做。
+     * 框高 = [WidgetData.photoWantedHeightDp] 算出来的"照片需要的高"，空间不够时再由
+     * [ExtrasPlanner] 降下来），所以解出来的位图与框**逐值同比例** —— 宿主那边什么裁剪也不需要做。
      *
      * @param widthDp  图片框的内容宽度（[WidgetData.contentWidthDp]）
-     * @param heightDp 这次分给图片框的高度（[WidgetData.photoBoxTargetDp] / [ExtrasPlanner] 的结论）
+     * @param heightDp 这一次图片框分到的高度（[ExtrasPlanner] 的结论 = [WidgetData.photoBoxTargetDp]）
      */
     fun targetPx(widthDp: Int, heightDp: Int, density: Float): IntArray {
         val w = Math.ceil(widthDp.coerceAtLeast(1) * density.toDouble()).toInt().coerceAtLeast(1)
@@ -123,6 +123,75 @@ internal object PhotoBitmap {
     fun configLabel(bitmap: Bitmap): String = bitmap.config?.name ?: "?"
 
     /**
+     * **照片（第一张）的宽高比** `宽/高` —— 图片框该有多高就是由它决定的
+     * （[WidgetData.photoWantedHeightDp]）。取不到时返回 null。
+     *
+     * ## 为什么是"第一张"，而不是"当前要显示的那一张"
+     *
+     * 因为框高必须**稳定**。用户点一下图片区就换下一张，如果比例跟着当前那张走：
+     *  - 两张照片比例不同（比如一张 3.14:1、一张 1.5:1）→ 框高在 72dp / 150dp 之间来回跳，
+     *    组件高度跟着跳，课程行数也跟着跳 —— 点一下换图，组件整体变形；
+     *  - 更糟的是"当前那张"在解码失败时会被跳过（[WidgetExtras.decodeFrom]），
+     *    于是框高还取决于哪张图坏了。
+     *
+     * 而第一张是可以当"基准形状"用的：**导入时的裁剪框形状是统一的**
+     * （`ui/PhotoCropDialog` 对所有照片用同一个 [CropFrame]），所以这些照片本来就该同比例 ——
+     * 拿第一张当基准，等于拿用户当初裁的那条框当基准。
+     *
+     * ## 为什么是"bounds"而不是把图解码出来
+     *
+     * `inJustDecodeBounds` 只读文件头（不分配像素），所以每次刷新多读几个字节而已；
+     * 真要解码一张 4000×3000 的图来问比例，代价是几十 MB 内存 —— 而这条路径在
+     * 小组件刷新的主线程上（见 [decode] 的注释）。
+     *
+     * @return 宽高比；第一张读不出来时按顺序往后找（被删/坏掉的第一张不该让整个图片区消失），
+     *         一张都读不出来时返回 null（调用方按"没有照片"处理）
+     */
+    fun photoAspect(context: Context): Float? {
+        // 一律 runCatching：这条路径在小组件刷新的主线程上，读文件头的失败模式（权限、坏文件、
+        // 被云同步占住）比想象的多，而"取不到比例"本来就有明确兜底（不预留、不显示图片）。
+        val bounds = aspectOfPhotos(WidgetData.photoList(context)) { path ->
+            runCatching { boundsOf(path) }.getOrNull()
+        }
+        if (bounds == null) return null
+        return bounds[0].toFloat() / bounds[1].toFloat()
+    }
+
+    /**
+     * 纯函数（可单测）：**选哪一张照片的尺寸当框高的基准** —— 第一张读得出尺寸的就是它。
+     *
+     * 抽出来的理由与 [WidgetData.photoWantedHeightDp] 那类纯函数一样：单测里 Android API 全是
+     * "返回默认值"的假实现，不把"挑哪张"这条决策与 `BitmapFactory` 解耦，就一行都测不到 ——
+     * 而"用第一张"正是本次的稳定性要求（点一下换下一张时组件高度不能跳）。
+     *
+     * @param paths 候选照片路径（按"第一张在前"的顺序）
+     * @param boundsOf 取某张照片的 `[宽, 高]`；读不出来返回 null（真实实现是 [boundsOf]）
+     * @return 尺寸数组（`[宽, 高]`，都 > 0）；一张都读不出来时 null
+     */
+    fun aspectOfPhotos(paths: List<String>, boundsOf: (String) -> IntArray?): IntArray? {
+        for (path in paths) {
+            val bounds = boundsOf(path) ?: continue
+            if (bounds.size < 2 || bounds[0] <= 0 || bounds[1] <= 0) continue
+            return bounds
+        }
+        return null
+    }
+
+    /**
+     * 只读文件头取尺寸（不分配像素）。返回 `[宽度, 高度]`；读不出来返回 null。
+     *
+     * 抽成独立函数是为了让 [photoAspect] 的"往后找"那条循环一眼能看懂，也让日志/自检将来能复用。
+     */
+    fun boundsOf(path: String): IntArray? {
+        val file = File(path)
+        if (!file.isFile || !file.canRead()) return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        return intArrayOf(bounds.outWidth, bounds.outHeight)
+    }
+
+    /**
      * 纯函数（可单测）：人类可读的宽高比（日志里用），例如 226×87dp → "2.60:1"。
      *
      * 为什么要打这个：用户看不到画面，只能看日志。而"框和图比例对不对"这件事
@@ -137,43 +206,85 @@ internal object PhotoBitmap {
     /**
      * 这一次渲染的全部日志字段（用户在真机上看不到画面，只能核对这一行数字）。
      *
-     * 必须出现的列（缺一列就少一个判据）：`框=`、`比例=`、`裁剪框=`、`完整显示/取中间块`、
-     * `bitmap=`、`byteCount=`、`config=`。有了它们，"组件里那张图是不是我们要的那一块"
-     * 就能直接对着截图数像素。
+     * 必须出现的列（缺一列就少一个判据）：`框=`、`照片比例=`、`比例=`、`需要的框高=`、
+     * `裁剪框=`、`完整显示/取中间块`、`留边=`、`行数=`、`bitmap=`、`byteCount=`、`config=`。
+     * 有了它们，"组件里那张图是不是我们要的那一块、留了多少白、排了几行课"就能直接对着截图数像素。
+     *
+     * ## `需要的框高=` 与 `框=` 必须能放在一起比
+     *
+     * 这两列**应该相等**：相等 = 框刚好装下照片（零留边），这是本次改动要的结果；
+     * `框 < 需要的框高` = 空间不够、框被压扁（走"取中间块"，属于允许的兜底）；
+     * `框 > 需要的框高` = 又回到了"框高由剩余空间定"的老病（下拉组件时一大片空白），
+     * 看到这一列不等就该去查 [WidgetData.photoBoxTargetDp] 是不是又被改回"按余量算"了。
+     *
+     * 行数是**排完框之后**实际排出来的整行数（[WidgetData.rowsFor]），与组件里显示的课程行数
+     * 用的是同一个纯函数 —— 日志说 2 行、画面就该是 2 行。
      *
      * 入参是 [RenderFacts] 而不是 Bitmap：单测里 Android 的 `Bitmap` 是"返回默认值"的假实现
      * （`Bitmap.createBitmap` 直接给 null），拿它当入参的话这段格式化代码一行都测不到 ——
      * 而日志是本项目唯一的核对手段，格式串必须被钉住。
+     *
+     * @param wantedHeightDp  照片在这个宽度下**需要**的框高（[WidgetData.photoWantedHeightDp]）
+     * @param rows            这一轮排出来的整行课程数（[WidgetData.rowsFor]）
+     * @param photoRatioLabel 当前显示的那张照片的比例（[ratioLabel] 的产物）
      */
     fun renderLabel(
         facts: RenderFacts,
         frame: CropFrame,
         boxWidthDp: Int,
-        boxHeightDp: Int
+        boxHeightDp: Int,
+        wantedHeightDp: Int,
+        rows: Int,
+        photoRatioLabel: String
     ): String {
         val layout = facts.layout
+        // 用户要求的那一行必须自带"留边"的**像素数**（不带百分比）：真机核对是拿截图数像素的，
+        // 百分比只是给人一眼看的粗细（0% 与 1px 是同一档，1px 肉眼看不出来）
         val edge = if (layout.whole) {
             "留边=${layout.padY}px(${Math.round(layout.padShare * 100)}%)"
         } else {
             "窗=${layout.window}"
         }
         return "框=${boxWidthDp}x${boxHeightDp}dp 比例=${ratioLabel(boxWidthDp, boxHeightDp)} " +
+            "照片比例=$photoRatioLabel 需要的框高=${wantedHeightDp}dp " +
             "裁剪框=${frame.label} 源=${facts.sourceW}x${facts.sourceH}" +
             "(${ratioLabel(facts.sourceW, facts.sourceH)}) " +
             "裁剪图=${layout.window.width}x${layout.window.height} " +
-            "${layout.verdict} $edge " +
+            "${layout.verdict} $edge 行数=$rows " +
             "bitmap=${facts.bitmapW}x${facts.bitmapH} " +
             "byteCount=${facts.byteCount}B(${sizeLabel(facts.byteCount)}) " +
             "config=${facts.config}"
     }
 
-    /** [renderLabel] 的便捷入口（真机路径用这个） */
+    /**
+     * [renderLabel] 的便捷入口（真机路径用这个）：把"框该多高、这张图什么比例、排了几行"
+     * 三个数字按当前状态算出来再格式化。三个数都是纯算术，没有任何 Context 依赖，
+     * 也没有可变的进程状态 —— 单测能直接构造 [RenderFacts] 验这一行。
+     *
+     * @param wantedHeightDp 图片框**应该**有的高度。调用方必须传**决定框高的那个比例**
+     *        （[WidgetData.photoWantedHeightDp]，即照片列表第一张的比例）算出来的值，
+     *        不能按当前显示那张算 —— 否则日志里的 `框 == 需要的框高` 这条不变量会被自己破坏，
+     *        而那条不变量正是"零留边"的判据。
+     * @param rows 这一轮实际排出来的整行课程数（[WidgetData.visibleRows]），与列表用的是同一次计算
+     */
     fun renderLabel(
         render: PhotoRender,
         frame: CropFrame,
         boxWidthDp: Int,
-        boxHeightDp: Int
-    ): String = renderLabel(render.facts(), frame, boxWidthDp, boxHeightDp)
+        boxHeightDp: Int,
+        wantedHeightDp: Int,
+        rows: Int
+    ): String = renderLabel(
+        facts = render.facts(),
+        frame = frame,
+        boxWidthDp = boxWidthDp,
+        boxHeightDp = boxHeightDp,
+        wantedHeightDp = wantedHeightDp,
+        rows = rows,
+        // 这一列说的是**当前显示的这一张**什么比例：与"决定框高的那张"不同时，
+        // 上面的 `留边=` 会把它放大成看得见的数字（哪天真的混进了不同比例的照片，日志里一眼能看出来）
+        photoRatioLabel = ratioLabel(render.sourceW, render.sourceH)
+    )
 
     /**
      * 解码一张图到"显示所需的最小尺寸"，并按 [PhotoFit.layout] 的结论裁+缩。

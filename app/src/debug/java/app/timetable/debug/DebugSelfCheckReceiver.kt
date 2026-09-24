@@ -654,7 +654,9 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 Triple("seed2.jpg", 0xFF2E9E5B.toInt(), "PHOTO 2")
             ).map { (fileName, bgColor, label) ->
                 val f = java.io.File(dir, fileName)
-                val bmp = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888)
+                // 640×204 ≈ 3.14:1 —— 与 4×2 组件上"按裁剪框裁好"的照片同形状，
+                // 这样真机上应当看到「需要的框高 = 框高、留边 = 0」，也就是不留白那种情况
+                val bmp = Bitmap.createBitmap(640, 204, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bmp)
                 canvas.drawColor(bgColor)
                 canvas.drawText(
@@ -683,12 +685,10 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             }
             Prefs.photoEnabled = true
             Prefs.quoteEnabled = true
-            // 「强制显示」= 跳过余量判断。自检的小组件往往被系统压在很小的尺寸上，
-            // 自动档会因为"真的放不下"而合理隐藏，那样就测不到渲染链路了。
-            Prefs.widgetExtrasOverride = 1
-            // 说明：以前这里能指定"显示方式/倍率"，那些开关已经彻底删掉了 ——
-            // 现在由渲染端自动决定（空间够就完整显示，不够就取裁剪图的中间一块），
-            // 用户要裁的话是在导入时用 PhotoCropDialog 自己裁。
+            // 「自动」档 = 用户实际用的档位。以前自检把它设成"强制显示"，是为了在矮组件上也能看到图，
+            // 但那会绕过余量判断 —— 现在要验的恰恰是"余量不足时会怎样"，所以必须用自动档。
+            Prefs.widgetExtrasOverride = 0
+            // 种完立刻刷一次组件，否则桌面还停在上一张/空状态（自检会读不到新数值）
             TodayWidgetProvider.refreshAll(context)
             Log.i(
                 TAG,

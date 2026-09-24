@@ -319,49 +319,81 @@ internal object WidgetData {
 
     // ------------------------------------------------- 列表下方的扩展区（每日一句 / 图片）
     //
-    // 这一段有两个数字决定观感，而且必须**同源**，否则"框"和"图"又会打架：
-    //  1. [photoHeightForWidthDp] —— 图片框的**理想**高度，只由宽度决定（16:9）；
-    //  2. [photoReserveDp] —— 排行数之前先扣掉的预留高度，用的就是同一个理想高度。
-    // 只要两处取同一个值，"行数不变、多出来的高度归图片"就自动成立（见 [rowsFor]）。
+    // 这个数字决定观感，而且必须**只有一处定义**，否则"框"和"图"又会打架：
+    //
+    //   框高 ← 它是"这张照片在这个内容宽度下**需要**多高"，只由「照片自己的比例」决定
+    //          （[photoWantedHeightDp]）；
+    //   预留 ← 排行数之前先扣掉的就是**同一个框高** + 它的 6dp 上边距（[photoReserveDp]）。
+    //
+    // 只要两处取同一个值，"行数排完成之后剩下的高度 = 框高"就自动成立（见 [rowsFor]），
+    // 于是框刚好装下照片、一个像素都不留边，多出来的高度全都变成课程行。
 
     /**
-     * 图片框的理想宽高比：**宽 : 高 = 16 : 9**。
+     * 纯函数（可单测）：**这张照片在这个内容宽度下需要多高**（dp）—— 也就是图片框该有多高。
      *
-     * 为什么改成"只由宽度决定"（老代码是按组件高度在 0.72 / 1.15 之间跳）：
-     *  - 老算法里同一个框随高度变比例，而照片比例是固定的，于是 `centerCrop` 每次裁在
-     *    不同的位置 —— 真机反馈的"窗口和图片大小不匹配"就是这么来的；
-     *  - 拉宽组件时图片应当跟着变大，比例由宽度定就自然有这个效果（拉宽 → 更宽也更高）。
+     * ## 为什么框高必须听照片的，不能听"剩余空间"
      *
-     * 为什么是 16:9 而不是 2:1：16:9 是相册/截图/视频最通用的横向比例，把一张 4:3 的竖构图
-     * 按它居中裁剪还能保留约 75% 的高度（主体多半还在）；2:1 只剩 2/3，人像的头部容易被切掉。
+     * 这是踩过的坑，别改回去：老做法是"框高 = 列表下方剩多少就用多少"
+     * （`框高 = 高度 − 头部 − 行数 × 行高`），然后把这个高度当**框**塞给照片。
+     * 结果用户按 4×2 的组件形状（226:72 ≈ 3.14:1）裁好照片，再把组件下拉变高：
+     *
+     * ```
+     * 4×2：框 226:72  = 3.14:1  ← 与照片同形 → 放得下 → 整张、零留边 ✓
+     * 4×3：框 226:135 = 1.67:1  ← 比照片"高" → [PhotoFit.layout] 判"放得下"
+     *                              → 照片按自己的比例完整显示 → 上下各留一大段空白（≈47%）
+     * ```
+     *
+     * 而课程行数并不会因为那 63dp 变多（它被预留吃掉了），所以用户看到的是
+     * **"图片保持不变、下面流出很多空白"**。根因就是"框高由剩余空间定"。
+     *
+     * 现在的口径反过来：**先让照片说自己要多高**（按内容宽度等比缩放），
+     * 再从这个高度开始排课程行 —— 多出来的高度归列表、不归框。判据也简单：
+     * 框和图同比例时 [PhotoFit.layout] 会退化成"逐值等于框"（零留边），
+     * 而框比照片高时必然留白。所以"零留边"与"框高 = 照片需要的高"是同一件事。
+     *
+     * 两个边界仍然要有，理由各不相同：
+     *  - **[PHOTO_MIN_DP] 下限**：内容宽很窄（或照片极扁）时算出来只有十几 dp，
+     *    那就不是"一张图"而是一条彩条了 —— 抬到下限；
+     *  - **[PHOTO_MAX_DP] 上限**：框高最多 150dp。超过这个数图片就开始喧宾夺主
+     *    （整块都成了图就不是课表组件了），而且白送像素过 binder（见 [PhotoBitmap.MAX_BITMAP_BYTES]）。
+     *    拉宽组件时框仍会跟着变大 —— 因为照片的比例固定，宽度上去了高度自然也上去。
+     *
+     * 取不到宽度（部分启动器不上报尺寸）或比例缺失/脏值时返回 **0**：
+     * 0 在这里的意思是"没有图片框"，调用方一律按"没有照片"处理 ——
+     * 这是本项目一贯的兜底方向（宁可什么都不显示，也不按瞎猜的数字排版）。
+     * 刻意**不**退回某个固定比例（老代码退回 16:9）：那正是"框的形状与用户裁好的照片不一致"
+     * 的另一个入口，退回去等于把这次修的病换个方式再犯一次。
+     *
+     * @param aspect 照片的宽高比 `宽/高`（> 0 才有效，见 [PhotoBitmap.photoAspect]）
      */
-    const val PHOTO_ASPECT = 16f / 9f
-
-    /**
-     * 纯函数（可单测）：按图片框的**内容宽度**（dp）算它的理想高度。
-     *
-     * 取不到宽度（部分启动器不上报）时给 [PHOTO_MIN_DP]：宁可小一点，也别按瞎猜的比例乱算。
-     * 上下一夹 [PHOTO_MIN_DP]..[PHOTO_MAX_DP]：太小的格子里再扁也得能看出是"一张图"，
-     * 太大的格子里图片也不该喧宾夺主（整块都成了图，就不是课表组件了）。
-     */
-    fun photoHeightForWidthDp(contentWidthDp: Int): Int {
-        if (contentWidthDp <= 0) return PHOTO_MIN_DP
-        return Math.round(contentWidthDp / PHOTO_ASPECT).coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
+    fun photoWantedHeightDp(contentWidthDp: Int, aspect: Float?): Int {
+        if (contentWidthDp <= 0) return 0
+        val a = aspect ?: return 0
+        if (a.isNaN() || a <= 0f) return 0
+        val heightDp = contentWidthDp.toFloat() / a
+        return Math.round(heightDp).coerceIn(PHOTO_MIN_DP, PHOTO_MAX_DP)
     }
 
-    /** 当前格子宽度下，图片框的**理想**高度（dp） */
-    fun photoIdealHeightDp(context: Context): Int =
-        photoHeightForWidthDp(contentWidthDp(context))
+    /**
+     * 当前照片需要多高（dp）—— 这就是图片框该有的高度。
+     *
+     * 比例取自**照片列表里的第一张**（[PhotoBitmap.photoAspect]）：导入时那个裁剪框的形状是
+     * 统一的，所有照片本来就该同比例，所以"第一张"就是"这个用户的照片形状"。为什么不取
+     * "当前要显示的那一张"：点一下换下一张时组件高度会跟着跳（见 [PhotoBitmap.photoAspect]）。
+     */
+    fun photoWantedHeightDp(context: Context): Int =
+        photoWantedHeightDp(contentWidthDp(context), PhotoBitmap.photoAspect(context))
 
     /**
-     * 图片区**先占走**的预留高度（dp）= 理想图片高度 + 它的 6dp 上边距；没开图片时是 0。
+     * 图片区**先占走**的预留高度（dp）= 图片框需要的高 + 它的 6dp 上边距；没开图片时是 0。
      *
      * 三个"0"的场合，都是为了让不用图片的人完全不受这次改动影响：
      *  - 图片开关没开 / 一张图都没有 → 没有图片区，没什么可预留的；
-     *  - [Prefs.widgetExtrasOverride] = -1（用户强制隐藏）→ 预留了反而白少一行课。
+     *  - [Prefs.widgetExtrasOverride] = -1（用户强制隐藏）→ 预留了反而白少一行课；
+     *  - 照片的比例取不到（[photoWantedHeightDp] 返回 0）→ 同上，不预留。
      *
      * **刻意不给"每日一句"预留**：句子只要 22dp，两样都开时由 [ExtrasPlanner] 从同一个预算里
-     * 分（先扣句子、剩下的归图片）。宁可图片因此扁一档，也不为了图片的 16:9 去多扣一行课 ——
+     * 分（先扣句子、剩下的归图片）。宁可图片因此少一行都不算，也不为了图片去多扣一行课 ——
      * 课表组件里，课程行数比图片的精确比例重要。
      */
     fun photoReserveDp(context: Context): Int {
@@ -369,31 +401,50 @@ internal object WidgetData {
         if (Prefs.widgetExtrasOverride < 0) return 0
         if (!Prefs.photoEnabled) return 0
         if (photoList(context).isEmpty()) return 0
-        return photoIdealHeightDp(context) + AREA_GAP_DP
+        return photoWantedHeightDp(context) + AREA_GAP_DP
     }
 
     /**
-     * 纯函数（可单测）：图片框这一次**实际**能有高度（dp）。
+     * 图片框这一次要显示多高（dp）—— 由 [photoWantedHeightDp] 决定，**与剩余空间无关**。
      *
-     * 与"理想高度"的区别：理想值是"16:9 该多高"，这里是"列表下方真剩多少" ——
-     * 不够一整行的那些余量（0..37dp）全部归图片，所以实际框会比 16:9 或扁或方一点。
-     * 这不违反"框和图同比例"：解码就按这个框的像素尺寸来（[PhotoBitmap.targetPx] + 居中裁剪），
-     * **框和位图永远同一个宽高比**，既不会拉伸，也不会露缝。
+     * 保留这个名字（它以前是"框能塞多高就塞多高"：`余量 − 6dp` 再夹到 150dp / 框宽以内）是因为
+     * 调用点读起来仍然要能对上是哪一块内容，而语义已经变成"照片需要多少"。那句老实现正是
+     * 本次要修的病根，见 [photoWantedHeightDp] 里那段 4×2 → 4×3 的账。
      *
-     * 两个上限，都是"别再长了"的意思：
-     *  - [PHOTO_MAX_DP]：再高就不是"课表下面一张配图"了，而且白白多传像素过 binder；
-     *  - **不比框自己还高**（`contentWidthDp`）：组件又高又窄时（行数已经被
-     *    [AUTO_MAX_ROWS] 封顶、余量却还有很多），光按余量算会把框拉成一个**竖着的框** ——
-     *    横构图的照片裁成竖构图会切掉大半，用户之前就吐槽过"近似正方形的块"。
-     *    到这一步宁可把多余的几 dp 留白，也不把框竖过来。
+     * 空间不够时**不在这里压框**：压了之后行数会按一个放不下的高度去排，底部照样会漏出空白/半行。
+     * 统一交给 [ExtrasPlanner.plan]（"照片要的 > 实际能给的" → 降到可用高度 + 居中取一块）。
+     *
+     * @param availableDp 这个参数**保留了签名但已经不参与计算** —— 传什么都不影响结果。
+     *        留着它是有意的：改签名会让这次改动看起来像"顺手重构"，而真相是**框高不再听空间的**；
+     *        调用点仍然把余量传进来，读者一眼能看到"这里曾经按余量算"。
      */
     fun photoBoxTargetDp(
-        availableDp: Int,
+        @Suppress("UNUSED_PARAMETER") availableDp: Int,
         contentWidthDp: Int,
-        gapDp: Int = AREA_GAP_DP
+        aspect: Float?,
+        @Suppress("UNUSED_PARAMETER") gapDp: Int = AREA_GAP_DP
+    ): Int = photoWantedHeightDp(contentWidthDp, aspect)
+
+    /**
+     * 纯函数（可单测）：**先把框高定下来**，再用剩下的高度排整行 —— 本轮的入口。
+     *
+     * 顺序是有意的，不能换：
+     *  1. 框高 = 照片需要的高（[photoWantedHeightDp]，只由照片比例与内容宽度决定）；
+     *  2. 行数 = [(高度 − 头部/页脚 − 框高 − 6dp 上边距) / 行高] 取整（[rowsFor]，**整数行**）。
+     *
+     * 于是同一档高度里怎么拖都是"框不变、行数只按整行跳"：多出一整行就多显示一节课，
+     * 剩下的零头归框（但框本身不会因为零头而长高，所以不会出现大片留白）。
+     */
+    fun photoRowsFor(
+        heightDp: Int,
+        contentWidthDp: Int,
+        manualRows: Int,
+        aspect: Float?,
+        slotDp: Float = ROW_SLOT_DP
     ): Int {
-        val hardMax = minOf(PHOTO_MAX_DP, maxOf(contentWidthDp, 1))
-        return (availableDp - gapDp).coerceIn(0, hardMax)
+        val box = photoWantedHeightDp(contentWidthDp, aspect)
+        val reserve = if (box > 0) box + AREA_GAP_DP else 0
+        return rowsFor(heightDp, manualRows, slotDp, reserve)
     }
 
     // ------------------------------------------- 裁剪框：组件是几乘几 → 框是什么形状
@@ -406,70 +457,44 @@ internal object WidgetData {
      * `AppWidgetManager.getAppWidgetOptions(id)` 报上来的 dp 尺寸才是真的
      * （[contentWidthDp] 与 [widgetHeightDp] 都走这条路）。
      *
-     * 比例 = 图片区**内容宽** : 图片区**可用高**（[photoFrameHeightDp]）。
+     * 比例 = 图片区**内容宽** : 图片区**该有多高**（[photoFrameHeightDp]）。
      * 取不到尺寸时由 [PhotoCrop.frame] 给兜底 2:1（理由写在那边的注释里）。
      */
     fun photoFrame(context: Context): CropFrame =
         PhotoCrop.frame(contentWidthDp(context), photoFrameHeightDp(context))
 
-    /** 当前尺寸下图片区能用多高（dp）—— 就是裁剪框的"高" */
-    fun photoFrameHeightDp(context: Context): Int {
-        Prefs.init(context)
-        return photoFrameHeightDp(
-            heightDp = widgetHeightDp(context),
-            contentWidthDp = contentWidthDp(context),
-            manualRows = manualRows(context),
-            quoteEnabled = Prefs.quoteEnabled,
-            override = Prefs.widgetExtrasOverride,
-            slotDp = naturalSlotDp(context)
-        )
-    }
+    /** 当前尺寸下图片区该有多高（dp）—— 就是裁剪框的"高" */
+    fun photoFrameHeightDp(context: Context): Int =
+        photoWantedHeightDp(context)
 
     /**
-     * 纯函数（可单测）：这个尺寸下图片区**能用多高**（dp）。
+     * 纯函数（可单测）：这个尺寸下图片区的**框高**（dp）。
      *
-     * ## 为什么它不是"另算一套"，而是渲染链路的镜像
+     * ## 它不是"另算一套"，而是渲染链路的镜像
      *
-     * 让裁剪框和组件里那一块**同形**是这次改动的全部目的：用户在框里选的那一块，
-     * 落到组件里就该原样出现（渲染时判到"放得下"，一分都不再裁）。所以这里刻意把
-     * [WidgetExtras.plan] 那条链路的每一步都抄了一遍、而不是取个近似值：
+     * 让裁剪框和组件里那一块**同形**是这条链路的全部目的：用户在框里选的那一块，
+     * 落到组件里就该原样出现（渲染时判到"放得下"，一分都不再裁）。
      *
-     * ```
-     * 预留 = 理想图片高（16:9）+ 6dp 上边距        ← 与 photoReserveDp 同源
-     * 行数 = rowsFor(高度, 手动行数, 行高, 预留)     ← 与 visibleRows 同源（含"先扣预留"）
-     * 余量 = 高度 − 头部/页脚 − 行数 × 行高          ← 与 extraSpaceDp 同源
-     * 框高 = ExtrasPlanner 从余量里分给图片的那一份  ← 与 WidgetExtras.plan 同源
-     * ```
+     * ## 为什么不再把 [WidgetExtras.plan] 的每一步抄一遍（上一版是那样写的）
      *
-     * **图片张数按 1 算**（[ExtrasPlanner.plan] 的 `photoCount = 1`）：这个方法是在
-     * 用户**正要导入第一张图**的时候调的，此刻组件里可能一张图都还没有，
-     * 按真实张数算会得到"图片区不存在、高度 0"，框就退化成兜底比例了 ——
-     * 而"导入之后组件会是什么样"才是用户真正在裁的形状。
+     * 上一版是 `框高 = ExtrasPlanner 从余量里分给图片的那一份`，也就是"空间剩多少就给图片多少"。
+     * 那条链路的输入里含**组件高度**，于是框高随组件高度变化 —— 而照片的比例是固定的，
+     * 二者一不一致就会出现留白（用户按 4×2 裁好、下拉成 4×3 → 上下各留 ≈28% 的空白，
+     * 见 [photoWantedHeightDp] 里那段账）。
      *
-     * 注意它**不依赖任何偏好开关**之外的东西，也不写回任何状态（纯函数）：
-     * 单测可以直接喂"4 列 × 2 行"（226×187dp 之类）的尺寸，逐值验证比例。
+     * 现在框高只由"照片的比例 × 内容宽度"决定（[photoWantedHeightDp]），**与组件高度无关**：
+     *  - 组件里显示时：框高就是这个值 → 照片按自己的比例完整显示、零留边；
+     *  - 裁剪界面里：框就是这个值 → 用户裁出来的照片比例 = 框比例，显示时同样零留边。
+     *
+     * 两条路因此**天然同源**，不需要再逐行抄一遍渲染链路（抄得越像，越容易在某个尺寸上
+     * 悄悄错开一档）。这也是为什么这里不再需要 `heightDp / manualRows / quoteEnabled / override`
+     * 这些参数 —— 它们本来就只影响"排几行课"，不影响框该多高。
+     *
+     * @param aspect 照片的比例；null / 非法时返回 0（调用方按"没有图片框"处理，
+     *               [PhotoCrop.frame] 会退兜底 2:1 —— 那是画框的兜底，不是排版数字的兜底）
      */
-    fun photoFrameHeightDp(
-        heightDp: Int,
-        contentWidthDp: Int,
-        manualRows: Int,
-        quoteEnabled: Boolean,
-        override: Int,
-        slotDp: Float = ROW_SLOT_DP
-    ): Int {
-        val reserve = photoHeightForWidthDp(contentWidthDp) + AREA_GAP_DP
-        val rows = rowsFor(heightDp, manualRows, slotDp, reserve)
-        val chrome = if (compactFor(heightDp, manualRows, slotDp)) CHROME_DP - FOOTER_DP else CHROME_DP
-        val avail = (heightDp - chrome - rows * slotDp).toInt()
-        return ExtrasPlanner.plan(
-            override = override,
-            quoteEnabled = quoteEnabled,
-            photoEnabled = true,
-            photoCount = 1,
-            availableDp = avail,
-            idealPhotoDp = photoBoxTargetDp(avail, contentWidthDp)
-        ).photoHeightDp
-    }
+    fun photoFrameHeightDp(contentWidthDp: Int, aspect: Float?): Int =
+        photoWantedHeightDp(contentWidthDp, aspect)
 
     /**
      * 列表下方还剩多少 dp 可用。
@@ -478,7 +503,7 @@ internal object WidgetData {
      * 根布局是 match_parent、子控件自顶向下排列，所以余量就落在底部。
      *
      * **注意**：[visibleRows] 已经把 [photoReserveDp] 扣掉了，所以这里返回的余量**包含
-     * 那块预留**（理想图片高度 + 上边距 + 不足一行的零头）。于是"开了图片却什么都看不到"
+     * 那块预留**（框高 + 上边距 + 排不下一整行的零头）。于是"开了图片却什么都看不到"
      * 只剩一种可能：格子被压得极小（90dp 那种最小尺寸）—— 连留着的那几 dp 都不够图片的硬底线
      * [PHOTO_HARD_MIN_DP]，那就只好不显示（宁可不显示，也不要一条 5dp 的彩条）。
      * 其余情况（≥150dp 的格子）图片一定会出来，不会再被"余量不足"吃掉。
@@ -532,9 +557,14 @@ internal object WidgetData {
         return (w - CONTENT_INSET_DP).coerceAtLeast(1)
     }
 
-    // 图片框的"理想高度"现在只有一处定义：[photoHeightForWidthDp]（按内容宽度算 16:9）。
-    // 老代码里那个按格子宽高在 0.72 / 1.15 之间跳的 photoHeightDpFor(width, height) 已删除 ——
-    // 它正是"同一个框比例飘忽、图被裁得怪"的源头，留着只会再被误用。
+    // 图片框高度现在只有一处定义：[photoWantedHeightDp]（照片比例 × 内容宽度）。
+    // 两个老实现都已删除，留着只会再被误用：
+    //   · photoHeightDpFor(width, height) —— 按格子宽高在 0.72 / 1.15 之间跳，
+    //     同一个框换个高度就换个比例，图被裁得怪；
+    //   · photoHeightForWidthDp(width) —— 固定 16:9。看起来只是"定一个好看的形状"，
+    //     但用户裁好的照片比例是**另一个**数（例如 3.14:1），框比照片高出来的每一 dp
+    //     都会变成图片上下的空白（真机日志里的"留边=74px(28%)"就是这么来的）。
+    //     框该怎么高只有一个正确答案：照片自己的比例。
 
     /** 当前小组件的 options（取不到返回 null） */
     private fun widgetOptions(context: Context): android.os.Bundle? {
