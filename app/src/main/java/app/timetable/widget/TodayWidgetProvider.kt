@@ -272,6 +272,15 @@ class TodayWidgetProvider : AppWidgetProvider() {
             val mode = WidgetData.mode(context)
             val week = WidgetData.currentWeek(context)
             val today = java.time.LocalDate.now()
+            val modeLabel = if (mode == WidgetData.MODE_TODAY) "今天" else "接下来"
+            // 每日一句**拼在副标题那一行**（用户要求："把话放在第 n 周接下来第 n 节同一行"）。
+            // 它不再占列表的一格、也不再占列表下方一条 —— 一个像素的位置都不多花。
+            // 开关（Prefs.quoteEnabled）与「强制隐藏」档位（-1）都照旧管着它。
+            val quote = if (WidgetData.quoteShown(context)) {
+                app.timetable.greet.QuoteOfDay.forDate(today)
+            } else {
+                null
+            }
 
             views.setTextViewText(
                 R.id.widget_title,
@@ -286,12 +295,11 @@ class TodayWidgetProvider : AppWidgetProvider() {
                         R.id.widget_empty, context.getString(R.string.widget_never_synced)
                     )
                     views.setViewVisibility(R.id.widget_empty, View.VISIBLE)
-                    views.setTextViewText(R.id.widget_footer, status.message)
                 }
 
                 // 有数据但当前模式没内容
                 rows.isEmpty() -> {
-                    views.setTextViewText(R.id.widget_subtitle, "第 $week 周")
+                    views.setTextViewText(R.id.widget_subtitle, WidgetData.subtitleText(week, null, 0, quote))
                     views.setTextViewText(
                         R.id.widget_empty,
                         context.getString(
@@ -300,29 +308,21 @@ class TodayWidgetProvider : AppWidgetProvider() {
                         )
                     )
                     views.setViewVisibility(R.id.widget_empty, View.VISIBLE)
-                    views.setTextViewText(R.id.widget_footer, syncHint(status.at))
                 }
 
                 else -> {
-                    val label = if (mode == WidgetData.MODE_TODAY) "今天" else "接下来"
-                    views.setTextViewText(R.id.widget_subtitle, "第 $week 周  ·  $label ${rows.size} 节")
-                    views.setViewVisibility(R.id.widget_empty, View.GONE)
                     views.setTextViewText(
-                        R.id.widget_footer,
-                        if (rows.size > 2) "${syncHint(status.at)} · 可上下滑动"
-                        else syncHint(status.at)
+                        R.id.widget_subtitle,
+                        WidgetData.subtitleText(week, modeLabel, rows.size, quote)
                     )
+                    views.setViewVisibility(R.id.widget_empty, View.GONE)
                 }
             }
 
-            // 矮组件（小米的格子普遍更小）把页脚收起来，把这点高度让给课程：
-            // 否则页脚自己就被裁掉半行，而课程一行都放不下。
-            // 有课程时才收 —— 空状态里页脚那句话是唯一的信息。
-            val compact = WidgetData.compact(context)
-            views.setViewVisibility(
-                R.id.widget_footer,
-                if (compact && rows.isNotEmpty()) View.GONE else View.VISIBLE
-            )
+            // 底部那条「X 分钟前同步 · 可上下滑动」**整行删掉了**（用户要求）。
+            // 控件本身留在布局里（debug 自检会引用它的 id），但永远不显示、也不设文字 ——
+            // 空状态原来靠它显示登录状态，现在那条信息由「未同步/还没数据」的提示语承担。
+            views.setViewVisibility(R.id.widget_footer, View.GONE)
             return views
         }
 
@@ -333,15 +333,9 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
 
-        private fun syncHint(at: Long): String {
-            if (at == 0L) return "未同步"
-            val min = (System.currentTimeMillis() - at) / 60000
-            return when {
-                min < 1 -> "刚刚同步"
-                min < 60 -> "$min 分钟前同步"
-                min < 60 * 24 -> "${min / 60} 小时前同步"
-                else -> "${min / (60 * 24)} 天前同步"
-            }
-        }
+        // syncHint() 已删除：它就是「X 分钟前同步」那句话的唯一来源，而用户要求把这一行去掉
+        // （见上面 setViewVisibility(widget_footer, GONE) 的注释）。
+        // 保留这段说明是为了下一个人别再把它加回来："多久没同步"在 App 里能看到，
+        // 小组件上那一行只是白占 22dp。
     }
 }

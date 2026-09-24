@@ -10,8 +10,8 @@ import java.io.File
  * 底部扩展区（现在只剩图片）的取舍规则 + 图片框高度 + **预留空间与行数的关系**。
  *
  * 这一组规格全部来自真机反馈：
- *  - **每日一句搬进列表了**（用户原话："把每日一句显示在可上下滑动的地方，并且在课表上面"）：
- *    它现在是 ListView 的第一项，跟着列表一起滚（[WidgetListPlan]）。
+ *  - **每日一句拼在副标题那一行**（用户原话："把话放在第 n 周接下来第 n 节同一行"）：
+ *    它不占列表格子、也不占固定高度，连底部那条「X 分钟前同步」的页脚也按用户要求整行删掉了。
  *    于是扩展区只剩图片，"句子和图片抢同一个预算、谁让谁"那套规则整条删掉了 ——
  *    "两个都开时句子被图片挤没"那类 bug 从此不可能再出现，因为两块不再共用一个位置。
  *  - **图片框高度 = 列表下方剩下的全部空间**（− 6dp 上边距）：本轮的核心。
@@ -290,11 +290,11 @@ class WidgetExtrasPlanTest {
         val aspect = 3.14f
         assertEquals(72, WidgetData.photoWantedHeightDp(226, aspect))
 
-        // 4×2（实测 187dp）：(187 − 71 − 78) / 38 = 1.0 → 1 行
+        // 4×2（实测 187dp）：(187 − 49 − 78) / 38 = 1.57 → 1 行
         assertEquals(1, WidgetData.photoRowsFor(187, 226, 0, aspect))
-        // 4×3（实测 250dp）：(250 − 71 − 78) / 38 = 2.66 → 2 行（下拉多显示一节课）
-        assertEquals(2, WidgetData.photoRowsFor(250, 226, 0, aspect))
-        // 最矮的格子（150dp）：(150 − 71 − 78) < 0 → 夹到 1 整行
+        // 4×3（实测 250dp）：(250 − 49 − 78) / 38 = 3.23 → 3 行（下拉多显示课）
+        assertEquals(3, WidgetData.photoRowsFor(250, 226, 0, aspect))
+        // 最矮的格子（150dp）：(150 − 49 − 78) < 0 → 夹到 1 整行
         assertEquals(1, WidgetData.photoRowsFor(150, 226, 0, aspect))
 
         // 硬约束：90..400dp 全区间都必须落在 1..AUTO_MAX_ROWS，且列表高度 = 行数 × 38dp（整行）
@@ -326,12 +326,8 @@ class WidgetExtrasPlanTest {
         val reserve = wanted + WidgetData.AREA_GAP_DP                  // 78
         var visible = 0
         for (h in 90..400) {
-            // 页脚按 compactFor 收不收（与 rowsFor 内部同源），保证算术与真机链路一致
-            val chrome = if (WidgetData.compactFor(h, 0)) {
-                WidgetData.CHROME_DP - WidgetData.FOOTER_DP
-            } else {
-                WidgetData.CHROME_DP
-            }
+            // chrome 现在恒为 49dp（页脚那一行删掉了，见 WidgetData.chromeDp）
+            val chrome = WidgetData.chromeDpFor(h, 0)
             val rows = WidgetData.photoRowsFor(h, 226, 0, aspect)
             assertEquals(
                 "${h}dp 的列表高度必须是行高的整数倍（否则底部会露半行）",
@@ -412,12 +408,12 @@ class WidgetExtrasPlanTest {
         val reserve = box + WidgetData.AREA_GAP_DP
         assertEquals(77, reserve)
 
-        // 150dp 的小格子：行数 1，列表下方余量 = 150 - 71（头部）- 38（一行）= 41dp
+        // 150dp 的小格子：行数 1，列表下方余量 = 150 - 49（头部，页脚已删）- 38（一行）= 63dp
         val rows = WidgetData.rowsFor(150, 0, WidgetData.ROW_SLOT_DP, reserve)
         assertEquals(1, rows)
-        val chrome = if (WidgetData.compactFor(150, 0)) WidgetData.CHROME_DP - WidgetData.FOOTER_DP else WidgetData.CHROME_DP
+        val chrome = WidgetData.chromeDpFor(150, 0)
         val avail = (150 - chrome - rows * WidgetData.ROW_SLOT_DP).toInt()
-        assertEquals(41, avail)
+        assertEquals(63, avail)
 
         val plan = ExtrasPlanner.plan(
             override = 0,
@@ -427,10 +423,10 @@ class WidgetExtrasPlanTest {
             wantedPhotoDp = WidgetData.photoBoxTargetDp(avail, 126, aspect)
         )
         assertTrue("150dp 的格子里，只要行数算得出来图片就必须显示（这是本轮要根治的失败模式）", plan.photoVisible)
-        // 空间不够（余量只有 41dp、而照片要 71dp）→ 框被压到 35dp（41 − 6dp 上边距），
+        // 余量 63dp、照片要 71dp → 框 = 63 − 6 = 57dp（比照片想要的矮一点 → 居中取一块），
         // 渲染时在这张裁剪图里居中取一块。这一档的行为**与本轮改动之前完全一致**。
-        assertEquals("框高 = 余量 - 6dp 上边距（空间不够，压扁它）", 35, plan.photoHeightDp)
-        // 而且整条链路加起来不能超出表格子：头部 71 + 列表 38 + 上边距 6 + 框 35 ≤ 150
+        assertEquals("框高 = 余量 − 6dp 上边距", 57, plan.photoHeightDp)
+        // 而且整条链路加起来不能超出表格子：头部 49 + 列表 38 + 上边距 6 + 框 57 ≤ 150
         assertTrue(chrome + rows * WidgetData.ROW_SLOT_DP + WidgetData.AREA_GAP_DP + plan.photoHeightDp <= 150f)
     }
 
@@ -444,34 +440,34 @@ class WidgetExtrasPlanTest {
 
         fun rowsAt(h: Int) = WidgetData.photoRowsFor(h, 226, 0, aspect)
         fun spaceAt(h: Int): Int {
-            val chrome = if (WidgetData.compactFor(h, 0)) {
-                WidgetData.CHROME_DP - WidgetData.FOOTER_DP
-            } else {
-                WidgetData.CHROME_DP
-            }
+            // chrome 恒为 49dp（页脚那一行删掉了）
+            val chrome = WidgetData.chromeDpFor(h, 0)
             return (h - chrome - rowsAt(h) * WidgetData.ROW_SLOT_DP).toInt()
         }
         fun planAt(h: Int): ExtrasPlan =
             ExtrasPlanner.plan(0, true, 3, spaceAt(h), wanted)
 
-        // 4×2（187dp）：1 行课 + 剩下的 78dp 全给框 → 框正好 72dp（= 照片想要的高度）
-        // → 比例一致 → [PhotoFit] 判"整张都在"，一个像素都不裁
+        // 187dp（真机 4×2 那一档）：1 行课 + 剩下的 100dp 全给框 → 框 94dp
+        // 照片本身只想要 72dp，页脚删掉后白赚回来的 22dp 也一并落在框上（72 + 22 = 94）：
+        // 多出来的高度**给框而不是留在底部**，框比照片自己的比例高一点时由 [PhotoFit]
+        // 居中取一块填满 —— 底部一个像素都不留。
         assertEquals(1, rowsAt(187))
-        assertEquals(72, planAt(187).photoHeightDp)
-        assertEquals(wanted, planAt(187).photoHeightDp)
-        // 4×3（250dp）：多出来的 63dp 先变成**第二行课**，剩下的零头归框 → 97dp
-        assertEquals(2, rowsAt(250))
-        assertEquals(97, planAt(250).photoHeightDp)
-        // 再往上拉：到 288dp 才轮到第 3 行，而这一档的框**仍是 97dp**（多出来的高度全变成了课）
-        assertEquals(3, rowsAt(288))
-        assertEquals(97, planAt(288).photoHeightDp)
-        assertEquals(4, rowsAt(326))
-        assertEquals(97, planAt(326).photoHeightDp)
-        // 4 行封顶（AUTO_MAX_ROWS）之后再拉高：没有行可加了，剩下的高度归框 → 171dp。
+        assertEquals(94, planAt(187).photoHeightDp)
+        assertEquals(wanted + 22, planAt(187).photoHeightDp)
+        // 250dp：多出来的高度先变成**整行课**（一口气排到 3 行），剩下的零头才归框 → 81dp
+        assertEquals(3, rowsAt(250))
+        assertEquals(81, planAt(250).photoHeightDp)
+        // 再往上拉到 288dp：刚好攒够第 4 行课 —— 多出来的高度全变成了课，所以这一档的框**仍是 81dp**
+        assertEquals(4, rowsAt(288))
+        assertEquals(81, planAt(288).photoHeightDp)
+        // 4 行已经排满（AUTO_MAX_ROWS）之后没有行可加了：再拉高，多出来的高度全部归框 → 119dp
+        assertEquals(WidgetData.AUTO_MAX_ROWS, rowsAt(326))
+        assertEquals(119, planAt(326).photoHeightDp)
+        // 继续拉高同理 → 193dp。
         // （这一档是"框变高、照片居中取一块"的最极端情况，但至少那块空间里是用户的照片，
         //   而不是一条底色 —— 用户："比留一条空白好看，也比拉伸好"）
         assertEquals(WidgetData.AUTO_MAX_ROWS, rowsAt(400))
-        assertEquals(171, planAt(400).photoHeightDp)
+        assertEquals(193, planAt(400).photoHeightDp)
 
         // 上面每一档的底部零头都必须正好是 0
         for (h in listOf(187, 250, 288, 326, 400)) {
@@ -632,9 +628,10 @@ class WidgetExtrasPlanTest {
      * （`build/test-results/testDebugUnitTest` 目录里每个测试类一个 XML，
      * `system-out` 节点里能直接读到）。
      *
-     * 前提：照片是用户按 4×2 那条框（226:72）裁出来的那张 → 宽高比 ≈ 3.14:1；
-     * **每日一句开着**（用户的实际配置）—— 它现在占列表的一格，所以列表格数用
-     * [WidgetData.listSlots]（课程数 + 句子那一格）算，而不是老的"只有课程行"。
+     * 前提：照片是用户按 4×2 那条框（226:72）裁出来的那张 → 宽高比 ≈ 3.14:1。
+     *
+     * **每日一句不再占任何空间**（用户要求：拼在「第 N 周 · 接下来 X 节」那一行），
+     * 页脚那一行也删了 —— 所以这里的格数就是纯课程行数，chrome 恒 49dp。
      */
     @Test
     fun theNumbersForEveryReferenceHeight() {
@@ -646,14 +643,12 @@ class WidgetExtrasPlanTest {
 
         val heights = listOf(150, 187, 250, 318)
         val photoReserve = wanted + WidgetData.AREA_GAP_DP   // 78dp
-        // 与真机链路同源：格数 → 余量 → 计划 → 解码目标 → 渲染结论（一个数字都不手抄）
-        fun slotsAt(heightDp: Int) = WidgetData.listSlots(
-            heightDp = heightDp, manualRows = 0, slotDp = WidgetData.ROW_SLOT_DP,
-            reserveDp = photoReserve, quoteOn = true
-        )
+        // 与真机链路同源：行数 → 余量 → 计划 → 解码目标 → 渲染结论（一个数字都不手抄）
+        fun rowsAt(heightDp: Int) =
+            WidgetData.rowsFor(heightDp, 0, WidgetData.ROW_SLOT_DP, photoReserve)
         fun spaceAt(heightDp: Int): Int =
             (heightDp - WidgetData.chromeDpFor(heightDp, 0) -
-                slotsAt(heightDp).totalSlots * WidgetData.ROW_SLOT_DP).toInt()
+                rowsAt(heightDp) * WidgetData.ROW_SLOT_DP).toInt()
         fun planAt(heightDp: Int): ExtrasPlan = ExtrasPlanner.plan(
             0, true, 1, spaceAt(heightDp), WidgetData.photoBoxTargetDp(spaceAt(heightDp), contentDp, ratio)
         )
@@ -667,7 +662,7 @@ class WidgetExtrasPlanTest {
 
         /** 用户要看的那一行（真机日志里的列与它一一对应） */
         fun report(heightDp: Int): String {
-            val slots = slotsAt(heightDp)
+            val rows = rowsAt(heightDp)
             val space = spaceAt(heightDp)
             val plan = planAt(heightDp)
             val leftover = ExtrasPlanner.leftoverBelowBoxDp(plan)
@@ -686,8 +681,7 @@ class WidgetExtrasPlanTest {
                 "${heightDp}dp 的框高 ${plan.photoHeightDp} 不该小于照片想要的 $wanted",
                 plan.photoHeightDp >= wanted || space < wanted + WidgetData.AREA_GAP_DP
             )
-            return "组件=${heightDp}dp 课程=${slots.courseRows}行 句子=${slots.quoteSlots}格 " +
-                "列表共${slots.totalSlots}格 余量=${space}dp 框=${contentDp}x${plan.photoHeightDp}dp " +
+            return "组件=${heightDp}dp 课程=${rows}行 余量=${space}dp 框=${contentDp}x${plan.photoHeightDp}dp " +
                 "框比例=${PhotoBitmap.ratioLabel(contentDp, plan.photoHeightDp)} " +
                 "照片比例=${PhotoBitmap.ratioLabel(saved[0], saved[1])} " +
                 "结论=${layout.verdict} 窗=${layout.window} 留边=${layout.padY}px " +
@@ -702,22 +696,19 @@ class WidgetExtrasPlanTest {
         heights.forEach { println(report(it)) }
 
         // ---- 逐档钉住的数字（这几列是"改动了就要显式改"的判据）----
-        // 150dp 是最矮那一档：句子另加一格会把图片压到 −3dp，所以退让成"句子占课程的一格"
-        // → 课程 0 行可见（往下滑还有）、图片保持 35dp；187dp 起让得起，课程行数一格不少
-        assertEquals(listOf(0, 1, 2, 4), heights.map { slotsAt(it).courseRows })
-        assertEquals(listOf(1, 1, 1, 1), heights.map { slotsAt(it).quoteSlots })
-        assertEquals(listOf(1, 2, 3, 5), heights.map { slotsAt(it).totalSlots })
-        // 框高 = 余量 − 6dp。150dp 那一档退让（句子占课程的一格、图片保持 35dp）；
-        // 其余档位"句子另加一格"，图片相应矮 38dp
-        assertEquals(listOf(35, 34, 59, 51), heights.map { planAt(it).photoHeightDp })
+        // chrome 49dp（页脚删掉了）+ 图片预留 78dp：150dp 装不下"预留+整行课"→夹到 1 行；
+        // 187dp 起每多 38dp 多一行课，318dp 撞自动档上限 4 行
+        assertEquals(listOf(1, 1, 3, 4), heights.map { rowsAt(it) })
+        // 框高 = 余量 − 6dp（余量 = 高度 − 49 − 行数×38）
+        assertEquals(listOf(57, 94, 81, 111), heights.map { planAt(it).photoHeightDp })
         // 解码尺寸（框的像素尺寸，density 2.625）
         assertEquals(
-            listOf(listOf(594, 92), listOf(594, 90), listOf(594, 155), listOf(594, 134)),
+            listOf(listOf(594, 150), listOf(594, 247), listOf(594, 213), listOf(594, 292)),
             heights.map { targetAt(it).toList() }
         )
         // 过 binder 的真实字节数（RGB_565，2 字节/像素；上限 600KB，见 PhotoBitmap.MAX_BITMAP_BYTES）
         assertEquals(
-            listOf(109_296, 106_920, 184_140, 159_192),
+            listOf(178_200, 293_436, 253_044, 346_896),
             heights.map { layoutAt(it).let { l -> l.outWidth * l.outHeight * PhotoBitmap.BYTES_PER_PIXEL } }
         )
         // 结论：只有"框高与照片比例一致"那一档才是整张显示，其余都是居中取一块
@@ -757,10 +748,10 @@ class WidgetExtrasPlanTest {
             "AREA_GAP_DP 必须等于布局里 widget_photo_area 的 layout_marginTop",
             WidgetData.AREA_GAP_DP, dpAttr(tagOf(xml, "widget_photo_area"), "layout_marginTop")
         )
-        // 每日一句**已经不在这张布局里**了（它搬进了 ListView，见 WidgetListPlanTest）：
+        // 每日一句**已经不在这张布局里**了（它拼在副标题那一行，见 WidgetSubtitleTest）：
         // 这条断言守着"别再有人把一块固定高度的句子塞回底部"——那正是本次要删掉的那 22dp
         assertFalse(
-            "widget_today.xml 里不该再有独立的每日一句控件（它现在是列表的第一项）",
+            "widget_today.xml 里不该再有独立的每日一句控件（它拼在副标题那一行）",
             xml.contains("@+id/widget_quote")
         )
     }
@@ -768,7 +759,7 @@ class WidgetExtrasPlanTest {
     @Test
     fun theForcedModeKeepsTheOldGenerosityMargin() {
         // 强制显示档用的是 `余量 + EXTRA_MIN_DP` 的宽松度（老代码就是 min(理想, 余量+22)）。
-        // 那个 22dp 原本是"一句话的占用"，句子搬走之后它只剩"别把救场档位收得比老代码更紧"这一个用途
+        // 那个 22dp 原本是"一句话的占用"，句子拼进副标题那一行之后，它只剩"别把救场档位收得比老代码更紧"这一个用途
         assertTrue(WidgetData.EXTRA_MIN_DP >= WidgetData.AREA_GAP_DP + 16)
         assertEquals(WidgetData.AREA_GAP_DP, gap)
     }

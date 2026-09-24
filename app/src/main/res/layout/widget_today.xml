@@ -30,11 +30,21 @@
                 android:textSize="15sp"
                 android:textStyle="bold" />
 
+            <!--
+              副标题：`第 N 周  ·  接下来 X 节  ·  每日一句` —— 每日一句拼在**这一行**上
+              （用户要求："把话放在第 n 周接下来第 n 节同一行"），于是它既不占列表的一格、
+              也不占列表下方一条，一个像素的位置都不多花。
+
+              maxLines=1 + ellipsize=end 是这里的关键：句子长了宁可截断，
+              也**绝不能换行** —— 一换行头部就变高，整块组件的行数与图片高度全跟着跳。
+            -->
             <TextView
                 android:id="@+id/widget_subtitle"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="1dp"
+                android:ellipsize="end"
+                android:maxLines="1"
                 android:textColor="@color/widget_subtext"
                 android:textSize="11sp" />
         </LinearLayout>
@@ -110,25 +120,27 @@
         android:textSize="12sp"
         android:visibility="gone" />
 
+    <!--
+      页脚（原来显示「X 分钟前同步 · 可上下滑动」）**这一行删掉了**（用户要求）。
+
+      控件本身留着是为了 `app/src/debug/**` 的自检还在 `findViewById(R.id.widget_footer)`
+      （那个目录不允许改动），但代码里**永远把它设为 GONE、也不设文字** —— 所以它不占位、
+      不显示。它原来的 22dp 已经还给布局：`WidgetData.chromeDp` / `rowsFor` 现在一律按
+      「头部 49dp」算（不再有"矮组件才收页脚"这一档），每一档高度要么多一行课、要么图片高 22dp。
+    -->
     <TextView
         android:id="@+id/widget_footer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
         android:textColor="@color/widget_subtext"
-        android:textSize="10sp" />
+        android:textSize="10sp"
+        android:visibility="gone" />
 
     <!--
-      每日一句**不在这里了**：它已经挪进上面的 ListView，当列表的第一项
-      （见 TimetableWidgetService 里的 WidgetListPlan / AgendaFactory.buildQuoteRow）。
-
-      为什么搬走（用户看过真机之后的要求："把每日一句显示在可上下滑动的地方，并且在课表上面"）：
-        · 原来它占着列表下方一块固定的 22dp（WidgetData.EXTRA_MIN_DP），还和图片抢同一个预算，
-          于是"谁让谁"要解释一遍；
-        · 现在它跟着列表一起滚，想多看一眼往下滑即可，不吃固定位置；
-        · 图片框因此独占列表下方，比原来高 22dp —— 底部这条留给照片，布局也就"刚刚好"。
-      行高刻意与课程行完全一致（复用 widget_today_row.xml 的 38dp 外壳，只把用不到的部件藏掉），
-      否则列表底部又会切出半行（真机反馈的"第三节课露半个"）。
+      每日一句**也不在这里**：它拼在上面的副标题那一行（`第 N 周 · 接下来 X 节 · 句子`），
+      见 WidgetData.subtitleText 与 TodayWidgetProvider.build。
+      既不占列表的一格、也不占列表下方一条 —— 用户要的就是"同一行"。
     -->
 
     <!--
