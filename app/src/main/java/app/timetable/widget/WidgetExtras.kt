@@ -11,12 +11,17 @@ import app.timetable.data.Prefs
 import java.io.File
 
 /**
- * 把「每日一句 / 图片」两块扩展内容挂到小组件的 RemoteViews 上。
+ * 把图片区（以及剩下的附加内容）挂到小组件的 RemoteViews 上。
  *
  * 单独抽出来是因为这段逻辑全在跟 RemoteViews 的限制打交道，塞进 build() 会很吵。
  *
  * ## 一路走到这一轮，图片区踩过哪些坑
  *
+ * 0. **每日一句已经搬走了**（用户看过真机之后的要求："把每日一句显示在可上下滑动的地方，
+ *    并且把原来的这句话（移到）课表上面"）：它现在是 ListView 的第一项，跟着列表一起滚
+ *    （[WidgetListPlan] / [AgendaFactory.buildQuoteRow]）。
+ *    于是扩展区只剩图片，"两块内容抢同一个预算、谁让谁"那套规则整条删掉了 ——
+ *    图片框比以前高 22dp（原来那 22dp 是句子的固定位置）。
  * 1. **图片区没有"轮播控件"**。以前开关打开时这里会 `setRemoteAdapter` 到一个
  *    `AdapterViewFlipper`：它是个可滚动的 AdapterView，会吃掉竖直手势，
  *    课程列表就滑不动了（"自动轮播启动后小组件无法使用"）。现在图片区永远是同一个
@@ -72,7 +77,6 @@ internal object WidgetExtras {
         val aspect = PhotoBitmap.photoAspect(context)
         return ExtrasPlanner.plan(
             override = Prefs.widgetExtrasOverride,
-            quoteEnabled = Prefs.quoteEnabled,
             photoEnabled = Prefs.photoEnabled,
             photoCount = photos(context).size,
             availableDp = space,
@@ -177,14 +181,11 @@ internal object WidgetExtras {
             Log.i(TAG, "扩展区 $plan 余量=${space}dp 图片=${photos.size}张（图片未显示）")
         }
 
-        // ---- 每日一句：不再因为"图片开着"就无条件让位，两块由 ExtrasPlanner 一起决策 ----
-        if (plan.quoteVisible) {
-            val quote = app.timetable.greet.QuoteOfDay.forDate(java.time.LocalDate.now())
-            views.setTextViewText(R.id.widget_quote, quote)
-            views.setViewVisibility(R.id.widget_quote, View.VISIBLE)
-        } else {
-            views.setViewVisibility(R.id.widget_quote, View.GONE)
-        }
+        // ---- 每日一句不在这里了 ----
+        // 它已经挪进上面的 ListView，当列表的第一项（TimetableWidgetService 的
+        // WidgetListPlan / AgendaFactory.buildQuoteRow）：跟着列表一起滚，不吃固定位置，
+        // 也不再和图片抢同一块预算（以前的"保图片、弃句子"那套规则随之删掉）。
+        // 这里剩下的只有图片区，所以上面那行日志里的 `image=` 就是扩展区的全部内容。
 
         // 自动换图：按当前状态排/撤闹钟。图片被隐藏、只剩一张、开关关掉，都会在这里被取消 ——
         // 放在这里是因为"图片到底显示没有"只有这里算得出来（见 PhotoAutoAdvance.sync）

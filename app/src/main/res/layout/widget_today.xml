@@ -119,19 +119,17 @@
         android:textSize="10sp" />
 
     <!--
-      每日一句：只在你打开开关、且列表下方**确实有余量**时显示（见 WidgetData.extraSpaceDp）。
-      单行 + 省略号：宁可截断，也不让它把小组件撑高、把课程挤走。
+      每日一句**不在这里了**：它已经挪进上面的 ListView，当列表的第一项
+      （见 TimetableWidgetService 里的 WidgetListPlan / AgendaFactory.buildQuoteRow）。
+
+      为什么搬走（用户看过真机之后的要求："把每日一句显示在可上下滑动的地方，并且在课表上面"）：
+        · 原来它占着列表下方一块固定的 22dp（WidgetData.EXTRA_MIN_DP），还和图片抢同一个预算，
+          于是"谁让谁"要解释一遍；
+        · 现在它跟着列表一起滚，想多看一眼往下滑即可，不吃固定位置；
+        · 图片框因此独占列表下方，比原来高 22dp —— 底部这条留给照片，布局也就"刚刚好"。
+      行高刻意与课程行完全一致（复用 widget_today_row.xml 的 38dp 外壳，只把用不到的部件藏掉），
+      否则列表底部又会切出半行（真机反馈的"第三节课露半个"）。
     -->
-    <TextView
-        android:id="@+id/widget_quote"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:ellipsize="end"
-        android:maxLines="1"
-        android:textColor="@color/widget_subtext"
-        android:textSize="11sp"
-        android:visibility="gone" />
 
     <!--
       图片框：一个 FrameLayout 包一个 ImageView。

@@ -221,10 +221,13 @@ internal object WidgetData {
      * 用 px 而不是 dp：RemoteViews 把 dp 换算成 px 时会取整，
      * 2 行 = 76dp × 2.625 = 199.5px → 截成 199px，最后一行就差 0.5px
      * （自检里表现为 `整行数=2.99` 这种非整数）。ceil 一次就干净了。
+     *
+     * 格数用 [listRows]（**含**每日一句那一格）：句子搬进列表之后它也占一格，
+     * 而这一格的账必须在排行数时就扣掉，否则列表会把图片区顶出去（见 [listSlots]）。
      */
     fun listHeightPx(context: Context): Int {
         val density = context.resources.displayMetrics.density
-        return Math.ceil(visibleRows(context) * naturalSlotDp(context) * density.toDouble()).toInt()
+        return Math.ceil(listRows(context) * naturalSlotDp(context) * density.toDouble()).toInt()
     }
 
     /**
@@ -240,13 +243,79 @@ internal object WidgetData {
      */
     fun naturalSlotDp(@Suppress("UNUSED_PARAMETER") context: Context): Float = ROW_SLOT_DP
 
-    /** 能放下的整行数（自动 1..4；手动指定时照办，1..6） */
+    /**
+     * 这一轮列表的**格数分配**（纯数据）：课程占几格、每日一句占几格。
+     *
+     * 为什么要有它就是本轮那个坑：句子搬进列表之后**它也占一格**。最初只让它"挤掉课程的一格"
+     * （列表总格数不变），结果在只有 1 格的格子上（4×2 + 图片，实测行数=1）——
+     * 整块组件只剩一句"好好吃饭"，一节课都看不见（真机 dump 里连课程文案都没有）。
+     * 所以现在给它**另算一格**，课程行数保持不变；只有"另算一格会把图片压到硬底线以下"时，
+     * 才退回"占课程的一格"（图片保持原样，课程少一格可见、往下滑还有）。
+     */
+    internal class ListSlots(val courseRows: Int, val quoteSlots: Int) {
+        /** 列表一共几格 = 课程 + 句子 */
+        val totalSlots: Int get() = courseRows + quoteSlots
+        override fun toString() = "课程 ${courseRows} 格 + 句子 ${quoteSlots} 格"
+    }
+
+    /**
+     * 纯函数（可单测）：[listSlots] 的全部规则。
+     *
+     * 两档，各自的账要算清（第一版写错过一次，别再改回去）：
+     *  1. **另加一格**：课程行数按**老口径**（只扣图片预留）算 [rows]，句子再要一格，
+     *     列表总格数 = rows + 1 —— 多出来的 38dp 由**图片**让出。
+     *     条件是让完之后图片还站得住硬底线；
+     *  2. **退让**：让不起就反过来，句子占课程的一格（课程可见行数 −1，图片保持原样）；
+     *     再挤也没有时课程为 0（往下滑还有，而不是"一节课都看不见"这种例外之外的取值）。
+     *
+     * 手动指定行数（[manualRows] > 0）时**永远走第 1 档**：用户说了几行课就是几行课
+     * （"手动行数档位语义不变"是条硬约束），句子再占一格，放不下由系统裁 —— 那个档位一贯如此。
+     */
+    fun listSlots(
+        heightDp: Int,
+        manualRows: Int,
+        slotDp: Float = ROW_SLOT_DP,
+        reserveDp: Int = 0,
+        quoteOn: Boolean = false,
+        minPhotoDp: Int = PHOTO_HARD_MIN_DP,
+        gapDp: Int = AREA_GAP_DP
+    ): ListSlots {
+        val rows = rowsFor(heightDp, manualRows, slotDp, reserveDp)
+        if (!quoteOn) return ListSlots(rows, 0)
+        if (manualRows > 0) return ListSlots(rows, 1)
+
+        // 图片让出那一格（38dp）之后还站得住吗？站得住 → 课程行数不变，句子另占一格
+        val photoWithQuote = heightDp - chromeDpFor(heightDp, manualRows, slotDp) -
+            (rows + 1) * slotDp - gapDp
+        if (photoWithQuote >= minPhotoDp) return ListSlots(rows, 1)
+
+        // 让不起 → 句子占课程的一格（图片保持原样；课程往下滑还有）
+        return ListSlots((rows - 1).coerceAtLeast(0), 1)
+    }
+
+    /** 纯函数版 chrome（[compactFor] 收页脚时会矮 [FOOTER_DP]），单测里不必造 Context */
+    fun chromeDpFor(heightDp: Int, manualRows: Int, slotDp: Float = ROW_SLOT_DP): Float {
+        @Suppress("UNUSED_EXPRESSION") slotDp
+        return if (compactFor(heightDp, manualRows)) CHROME_DP - FOOTER_DP else CHROME_DP
+    }
+
+    /** 能放下的**课程**整行数（自动 1..4；手动指定时照办，1..6）—— 不含每日一句那一格 */
     fun visibleRows(context: Context): Int =
-        rowsFor(
-            widgetHeightDp(context),
-            manualRows(context),
-            naturalSlotDp(context),
-            photoReserveDp(context)
+        slots(context).courseRows
+
+    /** 列表一共几格（课程 + 每日一句）；[listHeightPx] 与 [extraSpaceDp] 都用它 */
+    fun listRows(context: Context): Int = slots(context).totalSlots
+
+    /** 这一轮的格数分配（[visibleRows] / [listRows] 的唯一来源） */
+    fun slots(context: Context): ListSlots =
+        listSlots(
+            heightDp = widgetHeightDp(context),
+            manualRows = manualRows(context),
+            slotDp = naturalSlotDp(context),
+            reserveDp = photoReserveDp(context),
+            // 句子的开关与"强制隐藏"档位都由 WidgetListPlan 判（与列表工厂同一个判据，
+            // 否则会出现"列表排了句子、排版却不知道它占了一格"这种对不上的账）
+            quoteOn = WidgetListPlan.quoteRow(Prefs.quoteEnabled, Prefs.widgetExtrasOverride)
         )
 
     /**
@@ -312,14 +381,32 @@ internal object WidgetData {
             else -> "正常"
         }
         val h = widgetHeightDp(context)
-        return "已添加 ${ids.size} 个 · 采用高度 ${h}dp（$verdict） · 行高 ${slotText}dp · 放得下 $rows 整行" +
+        val slots = slots(context)
+        val quoteOn = WidgetListPlan.quoteRow(Prefs.quoteEnabled, Prefs.widgetExtrasOverride)
+        // 这一行是**给用户核对"手机上装的是哪一版"**用的（没有 adb 也能看）：
+        // 这一版把每日一句挪进了列表，诊断页应当出现 `每日一句=列表第一项`；
+        // 看不到这一行、或者写着"跟在列表下面"，就说明手机上还是旧包（先把旧的卸载再装新的）。
+        return "已添加 ${ids.size} 个 · 采用高度 ${h}dp（$verdict） · 行高 ${slotText}dp" +
+            "\n列表 ${slots.courseRows} 格课 + ${slots.quoteSlots} 格句子 = 共 ${slots.totalSlots} 格" +
+            " · 每日一句=${if (quoteOn) "开" else "关"}" +
             "\n系统原值：minH=$minH maxH=$maxH minW=$minW maxW=$maxW" +
-            "｜本应用声明：minH=$DECLARED_MIN_HEIGHT_DP minResizeH=$DECLARED_MIN_RESIZE_HEIGHT_DP"
+            "｜本应用声明：minH=$DECLARED_MIN_HEIGHT_DP minResizeH=$DECLARED_MIN_RESIZE_HEIGHT_DP" +
+            "\n布局版本=${LAYOUT_MARKER}"
     }
 
-    // ------------------------------------------------- 列表下方的扩展区（每日一句 / 图片）
+    /**
+     * 诊断用：**这一版布局的代号**（改了小组件布局就改它）。
+     *
+     * 用户在诊断页（或截图）里看到这一串，就能确认手机上跑的是哪一版 ——
+     * 这一轮反复出现"装上去没变化"，而手机上**看不出装的是哪一版**正是排查的死结
+     * （包名、版本号都一样，只有这里能区分）。
+     */
+    const val LAYOUT_MARKER = "v3-每日一句在列表第一项"
+
+    // ------------------------------------------------- 列表下方的扩展区（现在只剩图片）
     //
-    // 这个数字决定观感，而且必须**只有一处定义**，否则"留多少高度"这件事会有两个说法：
+    // 每日一句已经搬进 ListView（跟着列表一起滚，见 [WidgetListPlan]），所以"扩展区"只剩图片，
+    // 这里的账也就只有一条：
     //
     //   照片需要的高 ← "这张照片在这个内容宽度下需要多高"，只由「照片自己的比例」决定
     //                  （[photoWantedHeightDp]）；
@@ -392,9 +479,9 @@ internal object WidgetData {
      *  - [Prefs.widgetExtrasOverride] = -1（用户强制隐藏）→ 预留了反而白少一行课；
      *  - 照片的比例取不到（[photoWantedHeightDp] 返回 0）→ 同上，不预留。
      *
-     * **刻意不给"每日一句"预留**：句子只要 22dp，两样都开时由 [ExtrasPlanner] 从同一个预算里
-     * 分（先扣句子、剩下的归图片）。宁可图片因此少一行都不算，也不为了图片去多扣一行课 ——
-     * 课表组件里，课程行数比图片的精确比例重要。
+     * **刻意不给"每日一句"预留**：它已经搬进 ListView（占的是列表自己的格子，见 [WidgetListPlan]），
+     * 不参与这里的预算。只有"课表组件里课程行数比图片的精确比例重要"这一条老规矩仍然成立：
+     * 宁可图片少一行可见，也不为了图片去多扣一行课。
      */
     fun photoReserveDp(context: Context): Int {
         Prefs.init(context)
@@ -515,7 +602,9 @@ internal object WidgetData {
      */
     fun extraSpaceDp(context: Context): Int {
         val h = widgetHeightDp(context)
-        val used = chromeDp(context) + visibleRows(context) * naturalSlotDp(context)
+        // 用 listRows（**含**每日一句那一格）：句子占的那一格也是列表吃掉的高度，
+        // 不算进来的话图片框会多算一格、把列表顶出去（那一格本来就是句子的）
+        val used = chromeDp(context) + listRows(context) * naturalSlotDp(context)
         return (h - used).toInt()
     }
 
@@ -577,11 +666,17 @@ internal object WidgetData {
         return runCatching { mgr.getAppWidgetOptions(id) }.getOrNull()
     }
 
-    /** 列表下方的扩展区最少需要多少 dp 才显示（一句话约 20dp，图片更多） */
+    /**
+     * 强制显示档给图片框留的**宽松余量**（dp）：22dp。
+     *
+     * 这个数原来叫"一句话的占用"（句子 11sp≈16dp + 6dp 上边距）—— 句子已经搬进列表了，
+     * 它现在只剩一个用途：**强制显示档用 `余量 + 22dp` 的宽松度**，
+     * 与老代码 `min(理想高度, 余量 + 22)` 逐值对齐，免得真要救的机型反而比之前显示得更小。
+     */
     const val EXTRA_MIN_DP = 22
 
     /**
-     * 图片框与每日一句的 `layout_marginTop`（dp）。
+     * 图片框的 `layout_marginTop`（dp）。
      *
      * 布局里写死 6dp，必须算进"余量"里 —— 只算控件高度不算边距，累计起来正好会把
      * 最后一块挤出去几个 dp（表现就是"图片下沿被裁掉一条"）。
@@ -589,7 +684,7 @@ internal object WidgetData {
     const val AREA_GAP_DP = 6
 
     /**
-     * 图片框的**硬底线**高度（dp）：低于它就不算"一张图"了，宁可退成一句话。
+     * 图片框的**硬底线**高度（dp）：低于它就不算"一张图"了，宁可不显示。
      *
      * 为什么不是 [PHOTO_MIN_DP]（56）：56 是"按宽高比算出来的理想值不会低于它"，
      * 属于**好看**的下限；而"能不能显示"是另一回事 —— 真机上小组件上报的余量常常只有 20~40dp，
