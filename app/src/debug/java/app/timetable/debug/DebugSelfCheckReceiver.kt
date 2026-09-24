@@ -70,6 +70,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_PHOTOSEED -> photoSeed(context, intent.getStringExtra("file"))
                 ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_CALCHECK -> calendarCheck(context)
+                ACTION_CROPCHECK -> cropCheck(context)
                 ACTION_GREETCHECK -> greetCheck(context)
                 else -> widgetSelfCheck(context)
             }
@@ -779,6 +780,38 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         }
     }
 
+    // --------------------------------------------------------- 裁剪界面自检
+
+    /**
+     * 直接把「导入时的裁剪界面」拉起来，用它自检用的那张图。
+     *
+     * 为什么需要：这是个**全新的界面**，正常入口藏在"设置 → 选图片 → 系统相册"后面，
+     * 自动化点不进去。而新界面第一次上真机的失败方式（构造参数、View 层次、
+     * 图片解码路径）恰恰是单测查不到的 —— 单测里 Canvas/Bitmap 全是假实现。
+     * 这里只负责"能不能正常打开"，观感还是得人看。
+     */
+    private fun cropCheck(context: Context) {
+        try {
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "CROPCHECK RESULT=FAIL 没有前台 Activity（先把 App 打开再发广播）")
+                return
+            }
+            val f = java.io.File(context.filesDir, "realfoto.png").takeIf { it.isFile }
+                ?: java.io.File(context.filesDir, "photos/seed1.jpg")
+            if (!f.isFile) {
+                Log.i(TAG, "CROPCHECK RESULT=FAIL 找不到可用的测试图（先发 PHOTOSEED）")
+                return
+            }
+            Log.i(TAG, "CROPCHECK 打开裁剪界面，用图 ${f.absolutePath} (${f.length()} 字节)")
+            app.timetable.ui.PhotoCropDialog.start(activity, listOf(android.net.Uri.fromFile(f))) { saved ->
+                Log.i(TAG, "CROPCHECK 裁剪流程结束，保存了 ${saved.size} 张：$saved")
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "CROPCHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
     // --------------------------------------------------------- 明文策略自检
 
     private fun probeCleartext(context: Context, url: String) {
@@ -837,6 +870,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_PHOTOSEED = "app.timetable.debug.PHOTOSEED"
         const val ACTION_PINWIDGET = "app.timetable.debug.PINWIDGET"
         const val ACTION_CALCHECK = "app.timetable.debug.CALCHECK"
+        const val ACTION_CROPCHECK = "app.timetable.debug.CROPCHECK"
         const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"
 
