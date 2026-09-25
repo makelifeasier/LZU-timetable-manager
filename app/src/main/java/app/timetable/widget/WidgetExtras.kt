@@ -133,12 +133,15 @@ internal object WidgetExtras {
                 // 高度只能用 setViewLayoutHeight 表达（布局里图片框是 0dp，位置与顺序由布局定）。
                 // 这个值 = **列表下方剩下的全部空间 − 6dp 上边距**（[ExtrasPlanner] 的结论）：
                 // 课程行数已经按整行定死，剩下的零头全归图片框，于是组件底部不再漏空白。
-                // 照片不会因此变形或被拉伸 —— 比例不一致时走"居中取一块填满"（[PhotoFit.layout]）。
+                //
+                // 单位是**像素**（不是 dp）：位图就是 [target] 那么多像素，容器必须逐像素相同 ——
+                // 用 dp 时框架会各自取整一次（94dp × 2.625 = 246.75 → 一边 246、一边 247），
+                // 差的这 1px 会让宿主 fitCenter 做一次亚像素缩放，照片边上出现一条缝。
                 runCatching {
                     views.setViewLayoutHeight(
                         R.id.widget_photo_area,
-                        plan.photoHeightDp.toFloat(),
-                        TypedValue.COMPLEX_UNIT_DIP
+                        target[1].toFloat(),
+                        TypedValue.COMPLEX_UNIT_PX
                     )
                 }
                 views.setViewVisibility(R.id.widget_photo_area, View.VISIBLE)

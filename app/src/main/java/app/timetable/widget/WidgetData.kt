@@ -135,13 +135,33 @@ internal object WidgetData {
     /** 系统**原样**回报的高度（dp），不做任何校正；0 = 没回报 */
     fun reportedHeightDp(context: Context): Int {
         val mgr = AppWidgetManager.getInstance(context) ?: return 0
-        val ids = runCatching {
-            mgr.getAppWidgetIds(ComponentName(context, TodayWidgetProvider::class.java))
-        }.getOrDefault(IntArray(0))
-        val id = ids.firstOrNull() ?: return 0
+        val id = activeWidgetId(context) ?: return 0
         return runCatching {
             mgr.getAppWidgetOptions(id)?.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT) ?: 0
         }.getOrDefault(0)
+    }
+
+    /**
+     * 正在构建的那一个小组件 id（0 = 没指定，按第一个算）。
+     *
+     * [TodayWidgetProvider.build] 会在自己那一次构建里把它设成当前 id。为什么需要：
+     * 桌面上**同时存在两个尺寸不同的组件**时（用户拖了一个 4×2、又拖了一个 4×4），
+     * 以前所有实例都读 `ids[0]` 的尺寸 —— 第二个就按第一个的高度排版，
+     * 高度对不上时要么底部留一大片空白、要么最后一个元素（图片）被裁掉一条。
+     * 每个实例用自己的 options 才是对的，而 options 是**按 id** 取的（见 [activeWidgetId]）。
+     */
+    @Volatile
+    var buildingWidgetId: Int = 0
+
+    /** 这一次该读哪一个实例的 options：优先"正在构建的那个"，否则退回第一个 */
+    private fun activeWidgetId(context: Context): Int? {
+        val mgr = AppWidgetManager.getInstance(context) ?: return null
+        val ids = runCatching {
+            mgr.getAppWidgetIds(ComponentName(context, TodayWidgetProvider::class.java))
+        }.getOrDefault(IntArray(0))
+        if (ids.isEmpty()) return null
+        if (buildingWidgetId != 0 && ids.contains(buildingWidgetId)) return buildingWidgetId
+        return ids[0]
     }
 
     /**
@@ -212,28 +232,91 @@ internal object WidgetData {
     }
 
     /**
-     * 头部/内边距实际占用的高度（dp）。
-     *
-     * **本轮起恒为 [CHROME_DP] − [FOOTER_DP]（49dp）**：底部那条「X 分钟前同步 · 可上下滑动」
-     * 被用户要求整行删掉了（[TodayWidgetProvider.build] 里永远把它设为 GONE），
-     * 于是页脚那 22dp 从"矮组件才收"变成"永远没有" —— 每一档高度都白赚回来 22dp
-     * （要么多一行课，要么图片高 22dp）。
-     *
-     * [compactFor] 仍然保留（debug 自检与老单测在用它），但它**不再参与高度计算**。
+     * 实测出来的 chrome（dp）。按"密度 / 字体缩放 / 内容宽度"缓存 —— 这三个量不变时
+     * 头部高度也不会变，不必每次刷新都 inflate 一遍布局（那是主线程上的几十微秒级开销）。
      */
-    fun chromeDp(@Suppress("UNUSED_PARAMETER") context: Context): Float = CHROME_DP - FOOTER_DP
+    private var chromeCacheKey: String = ""
+    private var chromeCacheValue: Float = CHROME_DP - FOOTER_DP
+
+    /** 实测值的合理区间（dp）：超出这个范围说明量出来的东西不是头部，宁可退回常量 */
+    private const val MIN_CHROME_DP = 24f
+    private const val MAX_CHROME_DP = 120f
 
     /**
-     * 列表高度（**像素**，向上取整）。
+     * 头部/内边距实际占用的高度（dp）—— **实测**，不再是写死的 49dp。
      *
-     * 用 px 而不是 dp：RemoteViews 把 dp 换算成 px 时会取整，
-     * 2 行 = 76dp × 2.625 = 199.5px → 截成 199px，最后一行就差 0.5px
-     * （自检里表现为 `整行数=2.99` 这种非整数）。ceil 一次就干净了。
+     * [chromeDpFor] 那 49dp 是"根布局 paddingTop 8 + 头部 37 + paddingBottom 4"这个**假设**。
+     * 头部是 `wrap_content` 的两行文字（15sp 标题 + 11sp 副标题）加上右边的胶囊/刷新按钮，
+     * 它的真实高度取决于**用户手机的字体大小与字体本身**（系统"字体大小"、厂商自带字体、
+     * 无障碍放大都会改它）。只要真实头部比假设高 6dp，整条链就比格子高 6dp —— 而最后一个元素
+     * （图片框）会被宿主裁掉 6dp，用户看到的就是"下方图片被遮住一小部分"。
+     *
+     * 做法：把这套布局原样 inflate 出来（同一份 XML、同一套字体度量），把头部那几个文案填成
+     * 真实长度，量一次头部高度，再加根布局自己的上下 padding。结果按
+     * （密度、字体缩放、内容宽度）缓存 —— 这几个量不变时高度也不会变，不必每次刷新都 inflate。
+     *
+     * 量不出来（极少数 ROM 的 inflate 失败）就退回 [chromeDpFor] 的常量：
+     * **宁可沿用旧的估算，也不能因为"量不出来"让整个组件不显示**。
      */
-    fun listHeightPx(context: Context): Int {
+    fun chromeDp(context: Context): Float {
         val density = context.resources.displayMetrics.density
-        return Math.ceil(visibleRows(context) * naturalSlotDp(context) * density.toDouble()).toInt()
+        val widthPx = (contentWidthDp(context) * density).toInt().coerceAtLeast(1)
+        val key = "$density/${context.resources.configuration.fontScale}/$widthPx"
+        if (key == chromeCacheKey) return chromeCacheValue
+        val measured = runCatching { measureChromeDp(context, widthPx, density) }
+            .getOrNull()
+            ?.takeIf { it in MIN_CHROME_DP..MAX_CHROME_DP }
+            ?: chromeDpFor(widgetHeightDp(context), manualRows(context))
+        chromeCacheKey = key
+        chromeCacheValue = measured
+        return measured
     }
+
+    /**
+     * 真正去量那一次（[chromeDp] 的实现）：inflate → 填文案 → 量头部 → 加根布局的上下 padding。
+     *
+     * 文案是**代表性**的：标题按真实格式造一个最长的日期，副标题按最长的那种拼法
+     * （`第 N 周 · 接下来 X 节 · 句子`，它 maxLines=1，所以换行不会发生，只有字体高度在起作用）。
+     * 刷新按钮的文字写在 XML 里（`android:text`），不需要在这里补。
+     */
+    private fun measureChromeDp(context: Context, widthPx: Int, density: Float): Float {
+        val inflater = android.view.LayoutInflater.from(context)
+        val root = inflater.inflate(R.layout.widget_today, null) as? android.view.ViewGroup
+            ?: return chromeDpFor(widgetHeightDp(context), manualRows(context))
+        root.findViewById<android.widget.TextView>(R.id.widget_title)
+            ?.text = "12月28日 周日"
+        root.findViewById<android.widget.TextView>(R.id.widget_subtitle)
+            ?.text = "第 99 周  ·  接下来 99 节  ·  每日一句占位"
+        root.findViewById<android.widget.TextView>(R.id.widget_mode)
+            ?.text = "接下来 ▾"
+        // 头部的真实高度与宽度无关（这里所有文字都是单行 + 胶囊/按钮都是 wrap_content），
+        // 但仍然按真实内容宽度去量：万一哪天有人给头部加了会换行的东西，这里也不会量歪
+        val header = root.getChildAt(0) ?: return chromeDpFor(widgetHeightDp(context), manualRows(context))
+        header.measure(
+            android.view.View.MeasureSpec.makeMeasureSpec(widthPx, android.view.View.MeasureSpec.EXACTLY),
+            android.view.View.MeasureSpec.makeMeasureSpec(0, android.view.View.MeasureSpec.UNSPECIFIED)
+        )
+        val px = root.paddingTop + header.measuredHeight + root.paddingBottom
+        return px.toFloat() / density
+    }
+
+    /**
+     * 列表高度（**像素**）= 整行数 × **一行真实占的像素**。
+     *
+     * 用 px 而不是 dp：RemoteViews 把 dp 换算成 px 时会取整（38dp × 2.625 = 99.75px →
+     * 布局参数取整成 100px），按 dp 算出来的列表高度会与"行实际占的高度"差一点点
+     * （4 行时 ceil(4 × 99.75) = 399px，而四行实际要 400px → 最后一行被切掉 1px）。
+     *
+     * 所以这里的口径是**与框架完全一致**的那一个：每行 = `round(38 × density)` 像素
+     * （`LayoutParams` 的 dp 换算就是 `complexToDimensionPixelSize`，四舍五入），
+     * 列表高度 = 它 × 行数。整数像素相乘，永远不会再对不上。
+     */
+    fun rowSlotPx(context: Context): Int {
+        val density = context.resources.displayMetrics.density
+        return Math.max(1, Math.round(naturalSlotDp(context) * density))
+    }
+
+    fun listHeightPx(context: Context): Int = visibleRows(context) * rowSlotPx(context)
 
     /**
      * 一行的占用高度（dp）。**现在恒等于 [ROW_SLOT_DP]**。
@@ -249,10 +332,12 @@ internal object WidgetData {
     fun naturalSlotDp(@Suppress("UNUSED_PARAMETER") context: Context): Float = ROW_SLOT_DP
 
     /**
-     * 纯函数版 chrome（单测里不必造 Context）。
+     * 纯函数版 chrome（单测里不必造 Context）—— 现在它是**兜底常量**，不是运行时用的值。
      *
-     * 恒为 [CHROME_DP] − [FOOTER_DP]：页脚那一行删掉了，与 [chromeDp] 同源。
-     * 保留 `heightDp / manualRows` 两个参数只为让老调用方（参考表那类断言）读起来还是原来的样子。
+     * 运行时一律走 [chromeDp]（实测）。这里恒为 [CHROME_DP] − [FOOTER_DP]（49dp），
+     * 也就是"页脚那一行删掉之后"的老估算：只有在 [chromeDp] 量不出来、或者单测里没有真 Context
+     * 时才用到它。保留 `heightDp / manualRows` 两个参数只为让老调用方（参考表那类断言）
+     * 读起来还是原来的样子。
      */
     fun chromeDpFor(
         @Suppress("UNUSED_PARAMETER") heightDp: Int,
@@ -260,13 +345,14 @@ internal object WidgetData {
         @Suppress("UNUSED_PARAMETER") slotDp: Float = ROW_SLOT_DP
     ): Float = CHROME_DP - FOOTER_DP
 
-    /** 能放下的整行数（自动 1..4；手动指定时照办，1..6） */
+    /** 能放下的整行数（自动 1..4；手动指定时照办，1..6）—— 用**实测**的头部高度 */
     fun visibleRows(context: Context): Int =
         rowsFor(
             widgetHeightDp(context),
             manualRows(context),
             naturalSlotDp(context),
-            photoReserveDp(context)
+            photoReserveDp(context),
+            chromeDp(context)
         )
 
     /**
@@ -309,11 +395,11 @@ internal object WidgetData {
         heightDp: Int,
         manualRows: Int,
         slotDp: Float = ROW_SLOT_DP,
-        reserveDp: Int = 0
+        reserveDp: Int = 0,
+        chromeDp: Float = chromeDpFor(heightDp, manualRows, slotDp)
     ): Int {
-        // 页脚删掉之后 chrome 恒为 49dp（见 [chromeDp]）：不再有"矮组件才收页脚"这一档
-        val available = (heightDp.toFloat() - chromeDpFor(heightDp, manualRows, slotDp) - reserveDp)
-            .coerceAtLeast(0f)
+        // chrome 默认走"页脚删掉之后"的常量 49dp，运行时由调用方传**实测值**（见 [chromeDp]）
+        val available = (heightDp.toFloat() - chromeDp - reserveDp).coerceAtLeast(0f)
         return resolveRows(available, slotDp, manualRows)
     }
 
@@ -353,17 +439,44 @@ internal object WidgetData {
         }
         val h = widgetHeightDp(context)
         // 这一行是**给用户核对"手机上装的是哪一版"**用的（没有 adb 也能看）：
-        // 看到 `v4-句子拼在副标题行+页脚已删` 就是这一版；看不到就说明装的是旧包。
+        // 看到 [LAYOUT_MARKER] 就是这一版；看不到就说明装的是旧包。
         val quoteOn = quoteShown(context)
         val layoutLine = "布局版本=${LAYOUT_MARKER}" +
             " · 副标题=「${subtitleText(currentWeek(context), "接下来", rows, if (quoteOn) "…" else null)}」"
         val quoteLine = "每日一句=${if (quoteOn) "开（拼在副标题那一行）" else "关"} · 页脚=（这一行已删除）"
+        // 头部高度是**实测**的（见 [chromeDp]）。用户报"图片被遮住/下面有空白"时，
+        // 这一行是唯一能远程判断"到底是头部比常量高多少"的数字 ——
+        // 手机字体调大过、装了厂商字体的机器，这个值都会明显偏离 49dp。
+        // 整段 runCatching：诊断页在这一行上炸掉的话，用户就再也看不到别的信息了。
+        val chromeText = runCatching {
+            String.format(java.util.Locale.CHINA, "%.1f", chromeDp(context))
+        }.getOrElse { "?" }
+        val boxText = runCatching { photoBoxDp(context).toString() }.getOrElse { "?" }
+        val listText = runCatching { listHeightPx(context).toString() }.getOrElse { "?" }
         return "已添加 ${ids.size} 个 · 采用高度 ${h}dp（$verdict） · 行高 ${slotText}dp · 放得下 $rows 整行" +
+            "\n图片区：头部实测 ${chromeText}dp（常量 49dp）· 图片框 ${boxText}dp · 清单行 ${listText}px" +
             "\n$quoteLine" +
             "\n系统原值：minH=$minH maxH=$maxH minW=$minW maxW=$maxW" +
             "｜本应用声明：minH=$DECLARED_MIN_HEIGHT_DP minResizeH=$DECLARED_MIN_RESIZE_HEIGHT_DP" +
             "\n$layoutLine"
     }
+
+    /** 诊断页显示"图片框多高"（[ExtrasPlanner] 的结论；图片没开时是 0） */
+    fun photoBoxDp(context: Context): Int = runCatching {
+        Prefs.init(context)
+        val space = extraSpaceDp(context)
+        ExtrasPlanner.plan(
+            override = Prefs.widgetExtrasOverride,
+            photoEnabled = Prefs.photoEnabled,
+            photoCount = photoList(context).size,
+            availableDp = space,
+            wantedPhotoDp = photoBoxTargetDp(
+                space,
+                contentWidthDp(context),
+                PhotoBitmap.photoAspect(context)
+            )
+        ).photoHeightDp
+    }.getOrDefault(0)
 
     /**
      * 诊断用：**这一版布局的代号**（改了小组件布局就改它）。
@@ -372,7 +485,7 @@ internal object WidgetData {
      * 这一轮反复出现"装上去没变化"，而手机上**看不出装的是哪一版**正是排查的死结
      * （包名、版本号都一样，只有这里能区分）。
      */
-    const val LAYOUT_MARKER = "v4-句子拼在副标题行+页脚已删"
+    const val LAYOUT_MARKER = "v5-照片永远整张+模糊补边+头部实测"
 
     /**
      * 每日一句此刻要不要显示：开关开着（[Prefs.quoteEnabled]）且没有选「强制隐藏」
@@ -637,13 +750,10 @@ internal object WidgetData {
     //     都会变成图片上下的空白（真机日志里的"留边=74px(28%)"就是这么来的）。
     //     框该怎么高只有一个正确答案：照片自己的比例。
 
-    /** 当前小组件的 options（取不到返回 null） */
+    /** 当前小组件的 options（取不到返回 null）—— 取的是**正在构建的那个实例**的（见 [activeWidgetId]） */
     private fun widgetOptions(context: Context): android.os.Bundle? {
         val mgr = AppWidgetManager.getInstance(context) ?: return null
-        val ids = runCatching {
-            mgr.getAppWidgetIds(ComponentName(context, TodayWidgetProvider::class.java))
-        }.getOrDefault(IntArray(0))
-        val id = ids.firstOrNull() ?: return null
+        val id = activeWidgetId(context) ?: return null
         return runCatching { mgr.getAppWidgetOptions(id) }.getOrNull()
     }
 

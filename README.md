@@ -1,9 +1,9 @@
 # 兰大课表 · Android 桌面小组件
 
 [![CI](https://github.com/makelifeasier/LZU-timetable-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/makelifeasier/LZU-timetable-manager/actions/workflows/ci.yml)
-&nbsp;MIT License&nbsp;·&nbsp;Android 12+&nbsp;·&nbsp;v3.2.1
+&nbsp;MIT License&nbsp;·&nbsp;Android 12+&nbsp;·&nbsp;v3.3
 
-**下载**：到 [Releases](https://github.com/makelifeasier/LZU-timetable-manager/releases/latest) 拿 `timetable-v3.2.1.apk`（约 2.4 MB），
+**下载**：到 [Releases](https://github.com/makelifeasier/LZU-timetable-manager/releases/latest) 拿 `timetable-v3.3.apk`（约 2.7 MB），
 手机点开即装（会提示「未知来源」，属正常 —— 没走应用商店）。
 
 把兰州大学教务系统「学生课表」导入安卓，并在**桌面小组件**上直接显示今日课程。
@@ -19,7 +19,7 @@ App 自己把**你自己的**课表链接找出来并记住。
 
 - 包名 `app.timetable` · 版本 3.3 · minSdk 31（Android 12+）· targetSdk 36
 - APK 体积约 2.7 MB · 无第三方运行时依赖（仅 Android framework + Kotlin stdlib）
-- 462 个单元测试 · MIT License
+- 472 个单元测试 · MIT License
 
 > **iOS 版**在 [`ios/`](ios/README.md)：SwiftUI + WidgetKit 的同源移植，解析器/周次/链接发现逐条对应。
 > ⚠️ 那份代码**从未编译过**（开发机是 Windows，没有 macOS），需要你在 Mac 上跑一次它的单测来完成验证；
@@ -29,12 +29,12 @@ App 自己把**你自己的**课表链接找出来并记住。
 
 ## 一、安装
 
-APK：到 [Releases](https://github.com/makelifeasier/LZU-timetable-manager/releases/latest) 下载 `timetable-v3.2.1.apk`
+APK：到 [Releases](https://github.com/makelifeasier/LZU-timetable-manager/releases/latest) 下载 `timetable-v3.3.apk`
 （本仓库只放源码，二进制走 Releases，这样 clone 体积也小）
 
 **方式 A：数据线**
 ```powershell
-adb install -r timetable-v3.2.1.apk
+adb install -r timetable-v3.3.apk
 ```
 
 **方式 B：手机直接装**
@@ -299,7 +299,7 @@ v2.0 只扫一遍门户首页就下结论：扫到 0 条候选 → 退回兜底�
 
 ```powershell
 $env:JAVA_HOME = "<你的 JDK 17 目录，如 C:\Program Files\Eclipse Adoptium\jdk-17.x.x-hotspot>"
-.\gradlew.bat testDebugUnitTest    # 跑单测（462 个）
+.\gradlew.bat testDebugUnitTest    # 跑单测（472 个）
 .\gradlew.bat assembleDebug        # 调试包（含自检广播，仅测试用）
 .\gradlew.bat assembleRelease      # 正式包（未配签名时为未签名包）
 ```

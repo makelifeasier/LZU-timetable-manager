@@ -207,6 +207,18 @@ class TodayWidgetProvider : AppWidgetProvider() {
         }
 
         fun build(context: Context, widgetId: Int): RemoteViews {
+            // 构建期间告诉 WidgetData "现在构建的是哪一个实例"：尺寸（options）是**按 id** 取的，
+            // 桌面上同时有两个不同尺寸的组件时，各自按自己的高度排版才不会一个留白、一个被裁
+            // （见 WidgetData.buildingWidgetId / activeWidgetId）。
+            WidgetData.buildingWidgetId = widgetId
+            return try {
+                buildFor(context)
+            } finally {
+                WidgetData.buildingWidgetId = 0
+            }
+        }
+
+        private fun buildFor(context: Context): RemoteViews {
             val views = RemoteViews(context.packageName, R.layout.widget_today)
             val colors = WidgetColors.of(context)
 

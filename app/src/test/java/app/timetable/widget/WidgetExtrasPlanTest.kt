@@ -711,11 +711,21 @@ class WidgetExtrasPlanTest {
             listOf(178_200, 293_436, 253_044, 346_896),
             heights.map { layoutAt(it).let { l -> l.outWidth * l.outHeight * PhotoBitmap.BYTES_PER_PIXEL } }
         )
-        // 结论：只有"框高与照片比例一致"那一档才是整张显示，其余都是居中取一块
+        // 结论：这几档的框都比照片"扁"（框比例 3.7:1 上下 vs 照片 3.14:1）→ 照片整张居中，
+        // 四周那几条边由同一张图的模糊版本填满（**不再裁掉照片**，也不再留平底色）
         assertEquals(
-            listOf("取中间块", "取中间块", "取中间块", "取中间块"),
+            listOf("整张(居中+模糊底)", "整张(居中+模糊底)", "整张(居中+模糊底)", "整张(居中+模糊底)"),
             heights.map { layoutAt(it).verdict }
         )
+        // 而无论哪一档，**整张照片都在框里**（不越界 = 一个像素都没被遮住）
+        for (h in heights) {
+            val l = layoutAt(h)
+            val p = l.photo
+            assertTrue(
+                "${h}dp：整张照片越出框了 photo=$p 框=${l.outWidth}x${l.outHeight}",
+                p.x >= 0 && p.y >= 0 && p.x + p.width <= l.outWidth && p.y + p.height <= l.outHeight
+            )
+        }
         // 而无论哪一档，底部零头都是 0（= 日志里的 `底部零头=0dp`）
         assertEquals(
             List(heights.size) { 0 },
