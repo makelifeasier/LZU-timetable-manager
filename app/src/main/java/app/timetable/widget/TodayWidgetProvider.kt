@@ -311,7 +311,7 @@ class TodayWidgetProvider : AppWidgetProvider() {
 
                 // 有数据但当前模式没内容
                 rows.isEmpty() -> {
-                    views.setTextViewText(R.id.widget_subtitle, WidgetData.subtitleText(week, null, 0, quote))
+                    views.setTextViewText(R.id.widget_subtitle, WidgetData.subtitleText(week, quote))
                     views.setTextViewText(
                         R.id.widget_empty,
                         context.getString(
@@ -325,7 +325,7 @@ class TodayWidgetProvider : AppWidgetProvider() {
                 else -> {
                     views.setTextViewText(
                         R.id.widget_subtitle,
-                        WidgetData.subtitleText(week, modeLabel, rows.size, quote)
+                        WidgetData.subtitleText(week, quote)
                     )
                     views.setViewVisibility(R.id.widget_empty, View.GONE)
                 }

@@ -15,7 +15,10 @@ import java.io.File
  *  - 「X 分钟前同步」那一行整行不要。
  *
  * 于是：
- *  1. 副标题 = `第 N 周  ·  接下来 X 节  ·  句子`（[WidgetData.subtitleText]，纯函数，这里逐值钉）；
+ *  1. 副标题 = `第 N 周  ·  句子`（[WidgetData.subtitleText]，纯函数，这里逐值钉）；
+ *     —— 「接下来 X 节 / 整天 X 节」那一小段后来按用户要求也去掉了：
+ *        右上角胶囊已经写着「接下来 ▾ / 整天 ▾」，同一件事不必说两遍，
+ *        而且它占掉的宽度正是句子最需要的。
  *  2. 页脚永远不显示、也不设文字（[WidgetData.chromeDp] 与 [WidgetData.rowsFor] 一律按 49dp 算），
  *     省下的 22dp 归课程行或图片 —— 组件里每一行的位置都要有内容。
  *
@@ -33,28 +36,27 @@ class WidgetSubtitleTest {
     // --------------------------------------------------------------- 1. 副标题那一行
 
     @Test
-    fun theQuoteSitsOnTheSameLineAsTheWeekAndCount() {
-        // 用户要的就是这一行：`第 1 周  ·  接下来 4 节  ·  好好吃饭，才有力气学`
+    fun theQuoteSitsOnTheSameLineAsTheWeek() {
+        // 用户要的就是这一行：`第 1 周  ·  好好吃饭，才有力气学`
+        // （「接下来 4 节」那一段已按用户要求删掉 —— 胶囊已经写着模式了）
         assertEquals(
-            "第 1 周  ·  接下来 4 节  ·  好好吃饭，才有力气学",
-            WidgetData.subtitleText(week = 1, modeLabel = "接下来", count = 4, quote = "好好吃饭，才有力气学")
+            "第 1 周  ·  好好吃饭，才有力气学",
+            WidgetData.subtitleText(week = 1, quote = "好好吃饭，才有力气学")
         )
-        // 整天模式用「今天」
         assertEquals(
-            "第 8 周  ·  今天 6 节  ·  千里之行，始于足下",
-            WidgetData.subtitleText(8, "今天", 6, "千里之行，始于足下")
+            "第 8 周  ·  千里之行，始于足下",
+            WidgetData.subtitleText(8, "千里之行，始于足下")
         )
     }
 
     @Test
-    fun withoutTheQuoteTheLineIsExactlyWhatItWasBefore() {
-        // 关掉开关（或没有句子）时，副标题必须与改动前**逐字相同** —— 不用句子的人一个字都不该变
-        assertEquals("第 1 周  ·  接下来 4 节", WidgetData.subtitleText(1, "接下来", 4, null))
-        assertEquals("第 1 周  ·  接下来 4 节", WidgetData.subtitleText(1, "接下来", 4, ""))
-        assertEquals("第 1 周  ·  接下来 4 节", WidgetData.subtitleText(1, "接下来", 4, "   "))
-        // 没有任何课的那一档：只有「第 N 周」，句子照样可以跟在后面（空白别多出来）
-        assertEquals("第 3 周", WidgetData.subtitleText(3, null, 0, null))
-        assertEquals("第 3 周  ·  今天就这么过吧", WidgetData.subtitleText(3, null, 0, "今天就这么过吧"))
+    fun withoutTheQuoteTheLineIsJustTheWeek() {
+        // 关掉开关（或没有句子）时，副标题只剩「第 N 周」—— 不再有节数
+        assertEquals("第 1 周", WidgetData.subtitleText(1, null))
+        assertEquals("第 1 周", WidgetData.subtitleText(1, ""))
+        assertEquals("第 1 周", WidgetData.subtitleText(1, "   "))
+        assertEquals("第 3 周", WidgetData.subtitleText(3, null))
+        assertEquals("第 3 周  ·  今天就这么过吧", WidgetData.subtitleText(3, "今天就这么过吧"))
     }
 
     @Test
@@ -62,11 +64,12 @@ class WidgetSubtitleTest {
         // 分隔符是「  ·  」（两个空格 + 点 + 两个空格）—— 不许出现换行、不许留尾部空格，
         // 否则布局里的 ellipsize 会截出一段看着像空白的尾巴
         for (quote in listOf("短", "很长的一句话".repeat(12), "带 空格 的 句子")) {
-            val line = WidgetData.subtitleText(5, "接下来", 3, quote)
+            val line = WidgetData.subtitleText(5, quote)
             assertFalse("副标题里出现了换行：$line", line.contains("\n"))
             assertEquals("尾部不该有空格：$line", line, line.trimEnd())
             assertTrue("句子必须完整拼在后面：$line", line.endsWith(quote))
-            assertTrue("周次与节数必须在句子之前：$line", line.startsWith("第 5 周  ·  接下来 3 节  ·  "))
+            assertTrue("周次必须在句子之前：$line", line.startsWith("第 5 周  ·  "))
+            assertFalse("副标题里不该再出现「接下来 N 节」：$line", line.contains("节"))
         }
     }
 

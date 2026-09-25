@@ -356,21 +356,20 @@ internal object WidgetData {
         )
 
     /**
-     * 纯函数（可单测）：**副标题那一行**（`第 N 周 · 接下来 X 节` + 每日一句）。
+     * 纯函数（可单测）：**副标题那一行** = `第 N 周 · 每日一句`。
      *
      * 用户要求："把话（每日一句）放在第 N 周接下来第 N 节**同一行**" ——
      * 于是句子既不占列表的一格、也不占列表下方一条，一个像素的位置都不多花。
      * 太长就交给布局的 `maxLines=1 + ellipsize=end` 截断（宁可截断，也不换行把头部撑高）。
      *
-     * @param modeLabel `今天` / `接下来`；无课时传 null → 只显示「第 N 周」
-     * @param quote     每日一句；关着开关（或没有句子）时传 null
+     * 后来又按用户要求去掉了「接下来 X 节 / 整天 X 节」那一小段：
+     * 右上角那个胶囊本来就写着「接下来 ▾ / 整天 ▾」，同一件事不必说两遍；
+     * 而且它占掉的宽度正好是句子最需要的（句子一长就会被省略号截掉）。
+     *
+     * @param quote 每日一句；关着开关（或没有句子）时传 null → 只显示「第 N 周」
      */
-    fun subtitleText(week: Int, modeLabel: String?, count: Int, quote: String?): String {
-        val head = if (modeLabel == null) {
-            "第 $week 周"
-        } else {
-            "第 $week 周  ·  $modeLabel $count 节"
-        }
+    fun subtitleText(week: Int, quote: String?): String {
+        val head = "第 $week 周"
         return if (quote.isNullOrBlank()) head else "$head  ·  $quote"
     }
 
@@ -442,7 +441,7 @@ internal object WidgetData {
         // 看到 [LAYOUT_MARKER] 就是这一版；看不到就说明装的是旧包。
         val quoteOn = quoteShown(context)
         val layoutLine = "布局版本=${LAYOUT_MARKER}" +
-            " · 副标题=「${subtitleText(currentWeek(context), "接下来", rows, if (quoteOn) "…" else null)}」"
+            " · 副标题=「${subtitleText(currentWeek(context), if (quoteOn) "…" else null)}」"
         val quoteLine = "每日一句=${if (quoteOn) "开（拼在副标题那一行）" else "关"} · 页脚=（这一行已删除）"
         // 头部高度是**实测**的（见 [chromeDp]）。用户报"图片被遮住/下面有空白"时，
         // 这一行是唯一能远程判断"到底是头部比常量高多少"的数字 ——
