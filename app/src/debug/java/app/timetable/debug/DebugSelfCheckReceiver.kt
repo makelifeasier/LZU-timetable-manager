@@ -655,18 +655,30 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 Triple("seed2.jpg", 0xFF2E9E5B.toInt(), "PHOTO 2")
             ).map { (fileName, bgColor, label) ->
                 val f = java.io.File(dir, fileName)
-                // 640×204 ≈ 3.14:1 —— 与 4×2 组件上"按裁剪框裁好"的照片同形状，
-                // 这样真机上应当看到「需要的框高 = 框高、留边 = 0」，也就是不留白那种情况
+                // 640×204 ≈ 3.14:1 —— 与 4×2 组件上"按裁剪框裁好"的照片同形状。
+                //
+                // 画成**垂直条纹**而不是纯色：纯色图被"缩小再放大"也还是纯色，
+                // 根本看不出有没有模糊底；有条纹时条纹被糊掉是能**量**出来的
+                // （相邻列的色差会骤降）。这是"模糊块真的没了吗"唯一的客观判据。
                 val bmp = Bitmap.createBitmap(640, 204, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(bmp)
                 canvas.drawColor(bgColor)
+                val stripe = android.graphics.Paint().apply {
+                    color = 0xFFFFFFFF.toInt()
+                    style = android.graphics.Paint.Style.FILL
+                }
+                var sx = 0f
+                while (sx < 640f) {
+                    canvas.drawRect(sx, 0f, sx + 8f, 204f, stripe)
+                    sx += 16f
+                }
                 canvas.drawText(
                     label,
-                    160f,
-                    215f,
+                    150f,
+                    130f,
                     android.graphics.Paint().apply {
-                        color = 0xFFFFFFFF.toInt()
-                        textSize = 88f
+                        color = 0xFF000000.toInt()
+                        textSize = 56f
                         isFakeBoldText = true
                     }
                 )

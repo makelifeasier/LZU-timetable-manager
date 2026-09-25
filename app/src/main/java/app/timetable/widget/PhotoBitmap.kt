@@ -68,6 +68,15 @@ import java.io.File
  * 它**不动**上面那套预算：位图仍是 RGB_565、尺寸不变（见 [cornerFillArgb] 里"为什么不用 ARGB"）。
  * 画完之后还会读一个探针像素自查一次（[maskProbePixel]）—— 单测里画布是假的，
  * 那一步是真机上唯一能证明"遮罩真的画上去了"的东西。
+ *
+ * ## 框里**只画一层**（这一轮的关键，见 [PhotoFit] 的类注释）
+ *
+ * [decode] 的画布上只有**一次** `drawBitmap`：把 [PhotoFit.centerWindow] 取到的那一块
+ * 铺满整框。以前这里是两层（整张 contain + 缩到 1/8 再放大的"模糊底"补边），
+ * 用户真机上看到的就是**块状色块**（"图片上下怎么有模糊的像素图片块"），整条删掉了。
+ *
+ * 所以：**不要再往这块画布上加第二次绘制**（模糊底、纯色底、第二张图都不行）。
+ * 想让画面多一点内容，那是用户在**导入时的裁剪界面**里该决定的事 —— 裁量归用户。
  */
 internal object PhotoBitmap {
 
@@ -86,16 +95,6 @@ internal object PhotoBitmap {
 
     /** [Bitmap.Config.RGB_565] 每像素 2 字节 */
     const val BYTES_PER_PIXEL = 2
-
-    /**
-     * 模糊底图的分辨率除数：背景是"把同一张照片缩到框的 1/[BLUR_DIVISOR]，
-     * 再用双线性放大回整框"得到的 —— 这一步就是"廉价模糊"的全部实现
-     * （见 [decode] 里那段注释：为什么需要一个模糊底，而不是留白或者裁掉）。
-     *
-     * 8 是实测的折中：再小（16）就糊成色块、看不出照片的内容；再大（4）边缘还看得出细节，
-     * 反而像"两张照片拼在一起"。它只影响背景那几条边的观感，不影响照片本身。
-     */
-    const val BLUR_DIVISOR = 8
 
     /**
      * 圆角半径的**兜底值**（dp）—— 与 `res/drawable/widget_row_bg.xml` /
@@ -718,17 +717,23 @@ internal object PhotoBitmap {
      * 这一次渲染的全部日志字段（用户在真机上看不到画面，只能核对这一行数字）。
      *
      * 必须出现的列（缺一列就少一个判据）：`框=`、`照片比例=`、`比例=`、`需要的框高=`、
-     * `裁剪框=`、`完整显示/取中间块`、`留边=`、`行数=`、`bitmap=`、`byteCount=`、`config=`、
-     * `圆角=`、`角填色=`、`底部零头=`。
-     * 有了它们，"组件里那张图是不是我们要的那一块、留了多少白、排了几行课、四个角是怎么处理的、
-     * 底部还有没有空白"就能直接对着截图数像素。
+     * `裁剪框=`、`整张(铺满)/取中间块`、`取块=`、`留边=`、`行数=`、`bitmap=`、`byteCount=`、
+     * `config=`、`圆角=`、`角填色=`、`角像素=`、`底部零头=`。
+     * 有了它们，"组件里那张图是不是我们要的那一块、裁了多少、留了多少白、排了几行课、
+     * 四个角是怎么处理的、底部还有没有空白"就能直接对着截图数像素。
      *
-     * ## `框=` 与 `需要的框高=` 的关系（本轮变过，别看错）
+     * ## `取块=` 与 `整张(铺满)/取中间块`（本轮改的）
      *
-     * 上一轮这两列**应该相等**（框刚好装下照片、零留边）。本轮框改成"吃掉列表下方的全部剩余空间"
-     * 之后，自动档里 `框 ≥ 需要的框高` 是**正常**的（多出来的部分靠"取中间块"填满，
-     * 所以 `留边=` 仍然是 0）。真正要盯的不变量换成了两列：
-     *  - `留边=0px(0%)` —— 照片区里一条白都不该有；
+     * `取块=` 是**从源图上取的那一块**（px）：比例一致时它逐值等于 `源=`（一个像素都不裁），
+     * 比例不一致时它是源图内部正中那一块（裁掉"长出来"的那两条边）。这一列就是
+     * "我的照片被裁掉了哪一块"的答案 —— 它替代了旧的两列（contain 的矩形 / 模糊底的取块），
+     * 那两列的事实依据（两层渲染）已经整条删掉了。
+     *
+     * ## `框=` 与 `需要的框高=` 的关系（本轮没变）
+     *
+     * 自动档里 `框 ≥ 需要的框高` 是**正常**的（框吃掉列表下方的全部剩余空间，
+     * 多出来的部分靠"取中间块"填满，所以 `留边=` 仍然是 0）。真正要盯的不变量是两列：
+     *  - `留边=0px(0%)` —— 照片区里一条白都不该有（现在框里只画一层铺满的照片，结构上必为 0）；
      *  - `底部零头=0dp` —— 图片框下方（也就是整个组件的最下面）一条白都不该有。
      * 哪一天 `底部零头` 变成正数，说明"框吃掉零头"那条规则被人改回去了。
      *
@@ -756,14 +761,14 @@ internal object PhotoBitmap {
         leftoverDp: Int
     ): String {
         val layout = facts.layout
-        // 用户要求的那一行必须自带"留边"的**像素数**（不带百分比）：真机核对是拿截图数像素的，
-        // 百分比只是给人一眼看的粗细（0% 与 1px 是同一档，1px 肉眼看不出来）。
-        // 非"铺满"档打的是模糊底的取块窗口 —— 这一列回答"照片旁边那几条边是从源图哪一块糊出来的"。
-        val geometry = if (layout.whole) {
-            "留边=${layout.padY}px(${Math.round(layout.padShare * 100)}%)"
-        } else {
-            "底窗=${layout.window}"
-        }
+        // 取块 + 留边这两列一起打，**两种分支都打**：
+        //  · `取块=` 回答"从源图上取了哪一块"（比例一致时等于 `源=`，即一个像素都不裁）；
+        //  · `留边=` 回答"框里有没有没被画到的平底色"，用户要求它必须自带**像素数**
+        //    （不带百分比）：真机核对是拿截图数像素的，百分比只是给人一眼看的粗细
+        //    （0% 与 1px 是同一档，1px 肉眼看不出来）。
+        // 上一版这两列是**二选一**的（非铺满档只打模糊底那块的窗口，不留 `留边=`），那是为
+        // 背景层留的口子；框里只剩一层之后没有理由再让任何一档缺列。
+        val geometry = "取块=${layout.window} 留边=${layout.padY}px(${Math.round(layout.padShare * 100)}%)"
         // 圆角这几列是给"截图取像素"用的：拿到角落那个像素，它应该等于 `角填色=`，
         // 而 `角像素=` 是**遮罩之后从位图上实测读回来**的值（用户拿截图对的就是它，两边应当一致）。
         // `圆角=0px` = 这次没遮上（位图不可变 + copy 失败、或几何运算失败），
@@ -777,9 +782,6 @@ internal object PhotoBitmap {
             "照片比例=$photoRatioLabel 需要的框高=${wantedHeightDp}dp " +
             "裁剪框=${frame.label} 源=${facts.sourceW}x${facts.sourceH}" +
             "(${ratioLabel(facts.sourceW, facts.sourceH)}) " +
-            // `照片=` 是**整张照片落在框里的矩形**（px）：它永远不越出框，
-            // 用户拿截图量"照片有没有被遮住"就对这一列（见 PhotoFit.containRect）
-            "照片=${layout.photo} " +
             "${layout.verdict} $geometry 行数=$rows " +
             "bitmap=${facts.bitmapW}x${facts.bitmapH} " +
             "byteCount=${facts.byteCount}B(${sizeLabel(facts.byteCount)}) " +
@@ -822,7 +824,7 @@ internal object PhotoBitmap {
     )
 
     /**
-     * 解码一张图到"显示所需的最小尺寸"，并按 [PhotoFit.layout] 的结论裁+缩。
+     * 解码一张图到"显示所需的最小尺寸"，把 [PhotoFit.layout] 取到的那一块**铺满**框。
      *
      * 返回 null 表示这张图用不了（文件被删、损坏、不是图片……）—— 调用方应当**跳过它、
      * 换下一张**，而不是让整块图片区（甚至整个小组件）跟着空白。
@@ -853,7 +855,7 @@ internal object PhotoBitmap {
         // 真机日志里那张 917×137 的图是 491KB 而不是 251KB）。这里统一成 RGB_565。
         val decoded = toRgb565(raw)
 
-        // 这一次"整张照片摆在哪、背景取哪一块、缩到多大"—— 全部来自纯算术（PhotoFit.layout），
+        // 这一次"从源图取哪一块、缩到多大"—— 全部来自纯算术（PhotoFit.layout），
         // 这里只负责把它的结论喂给 Bitmap 工厂。
         val layout = PhotoFit.layout(decoded.width, decoded.height, targetW, targetH)
         if (layout == null) {
@@ -864,38 +866,23 @@ internal object PhotoBitmap {
         val srcW = decoded.width
         val srcH = decoded.height
 
-        // ---- 产出一块"与框同像素尺寸"的画布：先铺模糊底（只在需要时），再画**整张**照片 ----
-        // 顺序不能反：模糊底是背景，照片必须压在它上面。
+        // ---- 产出一块"与框同像素尺寸"的画布，上面**只画一层**：取到的那块铺满整框 ----
+        //
+        // 「只画一层」是这一轮用户反馈的直接结论，别再改回两层（`PhotoFit` 的类注释
+        // 写了完整理由）：以前这里先铺一层"同一张照片缩到 1/8 再双线性放大"的模糊底补边，
+        // 用户看到的是**块状色块**（原话："图片上下怎么有模糊的像素图片块"）。
+        // 取块与框**同比例**（[PhotoFit.centerWindow] 保证），所以这一次缩放既不留白、
+        // 也绝不拉伸 —— 画面里没有任何一处不是照片自己的像素。
+        val window = layout.window
+        val cover = slice(decoded, window)
         val produced = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.RGB_565)
         val canvas = Canvas(produced)
         // FILTER_BITMAP_FLAG = 双线性采样：缩小时不会出现锯齿，放大时也不会出现硬边
-        // （以前那条路走 Bitmap.createScaledBitmap(..., true)，内部就是同一个开关）
+        //（以前那条路走 createScaledBitmap，它内部就是同一个开关）
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-
-        if (layout.backdrop) {
-            // 模糊底 = 同一张照片按 cover 取一块 → 缩到框的 1/8 → 双线性放大回整框。
-            // 1/8 再放大这一下就是"廉价模糊"：不需要 RenderScript，也不会多花几百毫秒。
-            val cover = slice(decoded, layout.window)
-            val blurW = (targetW / BLUR_DIVISOR).coerceAtLeast(1)
-            val blurH = (targetH / BLUR_DIVISOR).coerceAtLeast(1)
-            val blur = runCatching { Bitmap.createScaledBitmap(cover, blurW, blurH, true) }.getOrNull()
-            val fill = if (blur != null && blur !== cover) blur else cover
-            canvas.drawBitmap(fill, null, Rect(0, 0, targetW, targetH), paint)
-            // 临时位图（1/8 那张很小，cover 那块与源图同量级）用完立刻回收
-            if (blur != null && blur !== cover) runCatching { blur.recycle() }
-            if (cover !== decoded) runCatching { cover.recycle() }
-        }
-
-        // 前景：**整张**照片（contain、居中）—— 这一步是"一个像素都不被遮住"的落点，
-        // 也是这一轮改动的全部目的（见 PhotoFit 的类注释）。
-        // 缩放交给画布（同一个双线性开关），所以这里不需要再造一张中间位图。
-        val photo = layout.photo
-        canvas.drawBitmap(
-            decoded,
-            null,
-            Rect(photo.x, photo.y, photo.x + photo.width, photo.y + photo.height),
-            paint
-        )
+        canvas.drawBitmap(cover, null, Rect(0, 0, targetW, targetH), paint)
+        // 临时位图立刻回收：比例一致时 [slice] 直接返回源图对象本身（不复制，别回收两次）
+        if (cover !== decoded) runCatching { cover.recycle() }
         decoded.recycle()
 
         // 真实的 byteCount 兜底：上面那条路按"2 字节/像素"估算，万一配置又不是 RGB_565
@@ -971,8 +958,8 @@ internal object PhotoBitmap {
      * 因为它要跟着 RemoteViews 过 binder，超了是"整次更新被系统丢掉"，不是"图糊一点"。
      *
      * （上一版这里还有一个 `scaleTo`：那时渲染是"切一块 → 缩到框尺寸"两步。
-     *  这一轮改成"在一张与框同尺寸的画布上先铺模糊底、再画整张照片"，
-     *  缩放直接内联在 [decode] 里，因为那里还要把临时位图登记下来统一回收。）
+     *  现在缩放内联在 [decode] 里那个画布上（取到的一块画满整框），所以没有中间位图要收尾。
+     *  预算**没有**因为"框里少画了一层背景"而放宽 —— 它算的是 binder 事务余量，与画面有几层无关。）
      */
     private fun fitBudget(src: Bitmap): Bitmap {
         val bytes = src.byteCount

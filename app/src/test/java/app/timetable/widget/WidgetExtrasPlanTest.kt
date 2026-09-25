@@ -654,9 +654,11 @@ class WidgetExtrasPlanTest {
         )
         fun targetAt(heightDp: Int) =
             PhotoBitmap.targetPx(contentDp, planAt(heightDp).photoHeightDp, density)
+        fun savedOf(heightDp: Int): IntArray =
+            PhotoCrop.encodeSize(PhotoCrop.frame(contentDp, wanted), targetAt(heightDp)[0])
         fun layoutAt(heightDp: Int): PhotoFit.Layout {
             val target = targetAt(heightDp)
-            val saved = PhotoCrop.encodeSize(PhotoCrop.frame(contentDp, wanted), target[0])
+            val saved = savedOf(heightDp)
             return PhotoFit.layout(saved[0], saved[1], target[0], target[1])!!
         }
 
@@ -667,7 +669,7 @@ class WidgetExtrasPlanTest {
             val plan = planAt(heightDp)
             val leftover = ExtrasPlanner.leftoverBelowBoxDp(plan)
             val target = targetAt(heightDp)
-            val saved = PhotoCrop.encodeSize(PhotoCrop.frame(contentDp, wanted), target[0])
+            val saved = savedOf(heightDp)
             val layout = layoutAt(heightDp)
             // 每一档都必须成立的不变量（= 日志里那两列要核对的结论）
             assertEquals("${heightDp}dp 的底部零头必须是 0", 0, leftover)
@@ -684,7 +686,7 @@ class WidgetExtrasPlanTest {
             return "组件=${heightDp}dp 课程=${rows}行 余量=${space}dp 框=${contentDp}x${plan.photoHeightDp}dp " +
                 "框比例=${PhotoBitmap.ratioLabel(contentDp, plan.photoHeightDp)} " +
                 "照片比例=${PhotoBitmap.ratioLabel(saved[0], saved[1])} " +
-                "结论=${layout.verdict} 窗=${layout.window} 留边=${layout.padY}px " +
+                "结论=${layout.verdict} 取块=${layout.window} 留边=${layout.padY}px " +
                 "底部零头=${leftover}dp 存盘=${saved.toList()} target=${target.toList()} " +
                 "bitmap=${layout.outWidth}x${layout.outHeight} " +
                 "byteCount=${layout.outWidth * layout.outHeight * PhotoBitmap.BYTES_PER_PIXEL}B"
@@ -711,19 +713,32 @@ class WidgetExtrasPlanTest {
             listOf(178_200, 293_436, 253_044, 346_896),
             heights.map { layoutAt(it).let { l -> l.outWidth * l.outHeight * PhotoBitmap.BYTES_PER_PIXEL } }
         )
-        // 结论：这几档的框都比照片"扁"（框比例 3.7:1 上下 vs 照片 3.14:1）→ 照片整张居中，
-        // 四周那几条边由同一张图的模糊版本填满（**不再裁掉照片**，也不再留平底色）
+        // 结论：这几档的框都比照片"扁"（框比例 2.0~4.0:1 vs 照片 3.14:1）→ 取源图内部正中那一块，
+        // 缩到框尺寸**铺满**（不留白、不拉伸、也没有第二层背景 —— 模糊底整条删掉了，
+        // 用户真机上看到的就是它的块状色块）
         assertEquals(
-            listOf("整张(居中+模糊底)", "整张(居中+模糊底)", "整张(居中+模糊底)", "整张(居中+模糊底)"),
+            listOf("取中间块", "取中间块", "取中间块", "取中间块"),
             heights.map { layoutAt(it).verdict }
         )
-        // 而无论哪一档，**整张照片都在框里**（不越界 = 一个像素都没被遮住）
+        // 而无论哪一档，**取块都完整落在源图里**（不越界 = 不会 createBitmap 崩），
+        // 且"尽可能大"（保住整高或整宽）与框同比例（不变形）
         for (h in heights) {
             val l = layoutAt(h)
-            val p = l.photo
+            val w = l.window
             assertTrue(
-                "${h}dp：整张照片越出框了 photo=$p 框=${l.outWidth}x${l.outHeight}",
-                p.x >= 0 && p.y >= 0 && p.x + p.width <= l.outWidth && p.y + p.height <= l.outHeight
+                "${h}dp：取块越出源图了 window=$w 源=${savedOf(h).toList()}",
+                w.x >= 0 && w.y >= 0 &&
+                    w.x + w.width <= savedOf(h)[0] && w.y + w.height <= savedOf(h)[1]
+            )
+            assertTrue(
+                "${h}dp：取块不是能取到的最大那一块 window=$w 源=${savedOf(h).toList()}",
+                w.width == savedOf(h)[0] || w.height == savedOf(h)[1]
+            )
+            val lhs = w.width.toLong() * l.outHeight
+            val rhs = l.outWidth.toLong() * w.height
+            assertTrue(
+                "${h}dp：取块与框不同比例（交叉相乘差 ${Math.abs(lhs - rhs)}）→ 铺满会变形",
+                Math.abs(lhs - rhs) <= maxOf(l.outWidth, l.outHeight).toLong()
             )
         }
         // 而无论哪一档，底部零头都是 0（= 日志里的 `底部零头=0dp`）

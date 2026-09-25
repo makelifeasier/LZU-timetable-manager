@@ -9,24 +9,33 @@ import org.junit.Test
 import java.io.File
 
 /**
- * 图片渲染的**几何决策**（纯函数部分）：整张摆在哪 / 背景取哪一块 / binder 预算与日志数字。
+ * 图片渲染的**几何决策**（纯函数部分）：从源图取哪一块 / 产出多大 / binder 预算与日志数字。
  *
- * 这一组守的是用户两句话引出来的那件事：
+ * 这一组守的是用户三句话引出来的那件事：
  *
  * > 「我不是要你有显示倍率，而是导入图片的时候可以自己裁剪，而且在空间足够的时候图片完整显示，
  * >   不够的时候显示自己裁剪的部分，注意组件是几乘几。」
  * > 「下方图片显示依然有被遮住一小部分的问题，你能不能一次性解决」
+ * > 「不错，效果好，但是图片上下怎么有模糊的像素图片块？其实我觉得也可以适当调大裁剪的大小
+ * >   让这些模糊色块消失」
  *
- * 三件事必须钉死，一个都不能靠"看起来对"：
+ * 四件事必须钉死，一个都不能靠"看起来对"：
  *
  *  1. **判据**：[PhotoFit.fitsWhole] 用整数交叉相乘（先转 Long）而不是两个 float 相除相比 ——
- *     "框和图比例完全相等"（= 用户按裁剪框裁出来的图，最常见的情况）必须落进"整张都在"，
+ *     "框和图比例完全相等"（= 用户按裁剪框裁出来的图，最常见的情况）必须落进"整张铺满"，
  *     浮点误差把它判偏就会平白切掉一条；
- *  2. **产出**：**永远逐值等于框**，而框里是"**整张**照片（contain、居中）"+
- *     "同一张照片的模糊版本补边"（见 [PhotoFit.containRect] / [PhotoFit.centerWindow]）——
- *     照片**一个像素都不许被遮住**，也不许留一条平底色；
- *  3. **永不越界**：照片矩形与背景窗口都完全来自这里，`Bitmap.createBitmap` 越界会抛
- *     `IllegalArgumentException`，而这段代码跑在小组件刷新的主线程上 —— 抛了就是整个 provider 挂掉。
+ *  2. **产出（两条路径）**：比例一致 → [PhotoFit.centerWindow] 取到的就是**整张源图**
+ *     （一个像素都不裁，日志「整张(铺满)」）；比例不一致 → 取源图内部**正中**那一块
+ *     （日志「取中间块」）。两种都**产出逐值等于框**（填满、零留白、零拉伸）；
+ *  3. **取块尽可能大**：这两种路径都必须满足"至少有一条边保住了源图的整条边"
+ *     （`窗口宽 == 源宽 || 窗口高 == 源高`）—— 那就是"与框同比例、居中、尽可能大"的判据；
+ *  4. **不再有任何模糊底**：上一版那层"缩到 1/8 再放大"的背景整条删掉了，所以这里既断言
+ *     日志里不出现那套字样，也**在源码级**断言整个 widget 包只画一次 `drawBitmap`
+ *     （见 [onlyOneLayerIsEverDrawnAndNoBackdropArtifactsRemain]）—— "画面里没有第二层背景"
+ *     这件事在单测里没有真画布可验，源码级计数是唯一能自证的办法。
+ *
+ * 另外一条硬约束：**永不越界**。取块窗口完全来自这里，`Bitmap.createBitmap` 越界会抛
+ * `IllegalArgumentException`，而这段代码跑在小组件刷新的主线程上 —— 抛了就是整个 provider 挂掉。
  *
  * 单测里 Android API 全是"返回默认值"的假实现（`isReturnDefaultValues = true`），
  * 所以这里**只测不碰 Bitmap/Context 的算术**（见文件末尾 [whatIsNotCoveredHere]）。
@@ -48,6 +57,18 @@ class PhotoFitTest {
         File("/$relative")
     ).firstOrNull { it.isFile }
 
+    /** widget 包下的源码目录（有两条路径是因为测试的工作目录可能是仓库根，也可能是 app/） */
+    private fun widgetSourceDir(): File = listOf(
+        File("src/main/java/app/timetable/widget"),
+        File("app/src/main/java/app/timetable/widget")
+    ).firstOrNull { it.isDirectory } ?: error("找不到 widget 源码目录（测试工作目录假设有变）")
+
+    private fun photoBitmapSource(): String {
+        val f = widgetSourceDir().listFiles { it -> it.name == "PhotoBitmap.kt" }?.firstOrNull()
+            ?: error("widget 源码目录里没有 PhotoBitmap.kt")
+        return f.readText()
+    }
+
     // ---------------------------------------------------------------- 1. 判据
 
     @Test
@@ -56,7 +77,7 @@ class PhotoFitTest {
         // 不成立 = 图比框更高/更窄 → 保住整宽、上下各裁一条。
         // 等号这一档（框和图同比例）必须成立 —— 这正是"用户按裁剪框裁出来的图"那种最常见的情况，
         // 判偏了就会平白切掉一条边。
-        assertTrue("同比例：窗口 = 整张源图（整张都在）", PhotoFit.fitsWhole(917, 137, 917, 137))
+        assertTrue("同比例：窗口 = 整张源图（一个像素都不裁）", PhotoFit.fitsWhole(917, 137, 917, 137))
         assertTrue("图比框更宽（9.17:1 进 6.69:1）：保住整高、左右各裁一条", PhotoFit.fitsWhole(917, 100, 917, 137))
         assertTrue("用户按裁剪框（226:72）裁出来、解码成 594×189", PhotoFit.fitsWhole(720, 229, 594, 189))
 
@@ -74,7 +95,7 @@ class PhotoFitTest {
     @Test
     fun fitsWholeUsesLongArithmeticSoBigImagesCannotOverflow() {
         // 交叉相乘在 Int 上会溢出：65536×65536 = 4.29e9 > Int.MAX_VALUE。
-        // 溢出会让判断随机翻转 —— 大图上"该完整显示却切成中间块"，或者反过来，
+        // 溢出会让判断随机翻转 —— 大图上"该一个像素都不裁却切成中间块"，或者反过来，
         // 而用户手里随便一张相册图就是 4000px 级别的。
         assertTrue(PhotoFit.fitsWhole(65536, 65536, 65536, 65536))
         assertTrue(PhotoFit.fitsWhole(65536, 65535, 65536, 65536))
@@ -91,41 +112,32 @@ class PhotoFitTest {
         assertFalse(PhotoFit.fitsWhole(-5, 1000, boxW, boxH))
     }
 
-    // ---------------------------------------------------------------- 2. 比例不一致 → 整张居中 + 模糊底
+    // ---------------------------------------------------------------- 2. 比例不一致 → 取中间块
 
     @Test
-    fun whenItDoesNotFitTheWholePhotoIsCentredAndTheBackdropTakesTheCoverSlice() {
-        // 真机那张 1440×3587 的竖屏截图：框 917×137（6.69:1）比图扁得多。这一档产出两样东西：
-        //  · **背景窗口** = 整宽 × 按框比例算出的高（1440 ÷ 6.6934 = 215），上下居中 —— 铺满整框；
-        //  · **照片本身** = 整张缩进框里（contain）：高顶满 137，宽 = round(137 × 1440/3587) = 55，水平居中。
-        // 用户那一句"图片被遮住一小部分"就是上一版在这里"取中间块"造成的 —— 现在整张都在。
+    fun whenTheRatiosDifferTheSliceComesFromTheMiddleOfTheSourceAndTheBoxIsFilled() {
+        // 真机那张 1440×3587 的竖屏截图：框 917×137（6.69:1）比图扁得多 →
+        // 保整宽、按框比例算出高（1440 ÷ 6.6934 = 215）、上下居中（(3587 − 215) ÷ 2 = 1686）。
+        // 这一块被缩到 917×137 铺满整框：没有任何留白，也没有第二层背景。
         val l = PhotoFit.layout(1440, 3587, boxW, boxH)!!
-        assertFalse("比例不一致 → 要画模糊底", l.whole)
-        assertEquals("背景窗口 = 覆盖整框的那一块", 1440, l.window.width)
+        assertFalse("比例不一致 → 取中间块（源图不会被整张硬塞进框）", l.whole)
+        assertEquals("取块 = 保整宽 × 按框比例算出的高", 1440, l.window.width)
         assertEquals(215, l.window.height)
         assertEquals(0, l.window.x)
         assertEquals(1686, l.window.y)          // (3587 − 215) ÷ 2 = 1686
-        // **整张照片落在框里的矩形**：不越界、居中、与源图同比例
-        assertEquals("整张的宽", 55, l.photo.width)
-        assertEquals("整张的高 = 框高", boxH, l.photo.height)
-        assertEquals("水平居中", (boxW - 55) / 2, l.photo.x)
-        assertEquals("垂直顶满", 0, l.photo.y)
         assertEquals("产出逐值等于框宽", boxW, l.outWidth)
         assertEquals("产出逐值等于框高", boxH, l.outHeight)
-        assertEquals("这一档也没有平底色留白（边界由模糊底填）", 0, l.padY)
-        assertEquals("整张(居中+模糊底)", l.verdict)
+        assertEquals("铺满 = 一条平底色留白都没有", 0, l.padY)
+        assertEquals("取中间块", l.verdict)
 
-        // 16:9 的横片同理：背景窗口 1600×239，纵向 661px 里居中 → 331；
-        // 整张照片高顶满 137、宽 = round(137 × 1600/900) = 244、水平居中 336
+        // 16:9 的横片同理：取块 1600×239，纵向 661px 里居中 → round(330.5) = 331
         val wide = PhotoFit.layout(1600, 900, boxW, boxH)!!
         assertEquals(1600, wide.window.width)
         assertEquals(239, wide.window.height)
         assertEquals(331, wide.window.y)
-        assertEquals(244, wide.photo.width)
-        assertEquals(137, wide.photo.height)
-        assertEquals(336, wide.photo.x)
         assertEquals(boxW, wide.outWidth)
         assertEquals(boxH, wide.outHeight)
+        assertEquals("取中间块", wide.verdict)
     }
 
     @Test
@@ -141,13 +153,20 @@ class PhotoFitTest {
             val right = c[1] - l.window.height - l.window.y
             assertTrue("竖直方向不居中：$left vs $right（${c.toList()}）", Math.abs(left - right) <= 1)
         }
+        // 水平方向同理（图比框更宽的那些：保整高、左右各裁一条）
+        for (c in listOf(intArrayOf(917, 100), intArrayOf(2000, 274), intArrayOf(4000, 300))) {
+            val l = PhotoFit.layout(c[0], c[1], boxW, boxH)!!
+            assertFalse("${c.toList()} 本来就该走取中间块", l.whole)
+            val left = l.window.x
+            val right = c[0] - l.window.width - l.window.x
+            assertTrue("水平方向不居中：$left vs $right（${c.toList()}）", Math.abs(left - right) <= 1)
+        }
     }
 
     @Test
     fun theSliceKeepsTheBoxRatioSoNothingGetsStretched() {
-        // 窗口与框同比例 ⇒ 缩到框尺寸时不会变形。允许 2% 的取整误差。
-        // （2000×274 那一组按"图比框宽"的口径会走**左右裁**，同样不属于"整张都在"；
-        //   这里只验窗口比例与产出尺寸这两条对每一组都成立的不变量）
+        // 取块与框同比例 ⇒ 缩到框尺寸时不会变形（这是"铺满"这个方案唯一不能破的几何前提）。
+        // 允许 2% 的取整误差；产出尺寸逐值等于框，误差一点都不要。
         for (c in listOf(
             intArrayOf(1600, 900), intArrayOf(1440, 3587), intArrayOf(1080, 2400),
             intArrayOf(4000, 3000), intArrayOf(1000, 1000)
@@ -157,84 +176,74 @@ class PhotoFitTest {
             val boxRatio = boxW.toDouble() / boxH.toDouble()
             val winRatio = l.window.width.toDouble() / l.window.height.toDouble()
             val err = Math.abs(boxRatio - winRatio) / boxRatio
-            assertTrue("${c.toList()} 的窗口比例 $winRatio 偏了 ${err * 100}%", err < 0.02)
-            // 产出必须逐值等于框：它就是"填满"的尺寸，误差一点都不要
-            assertEquals(boxW, l.outWidth)
-            assertEquals(boxH, l.outHeight)
+            assertTrue("${c.toList()} 的取块比例 $winRatio 偏了 ${err * 100}%", err < 0.02)
+            assertEquals("产出必须逐值等于框", boxW, l.outWidth)
+            assertEquals("产出必须逐值等于框", boxH, l.outHeight)
             assertEquals("留边恒为 0", 0, l.padY)
         }
     }
 
     // ---------------------------------------------------------------- 3. 本轮的两条产出路径
     //
-    // 规则只有一条：**产出逐值等于框**，框里永远是"整张照片 + 需要时用它的模糊版本补边"。
+    // 规则只有一条：**框里只画一层、且铺满**（[PhotoFit.centerWindow] 取的那一块）。
     // 两种可观察的结果：
-    //  · 比例一致 → 照片正好铺满整块，背景都不用画 → "整张(铺满)"；
-    //  · 比例不一致（框被拉高/压扁）→ 照片整张居中，四周那几条边是它的模糊版本 → "整张(居中+模糊底)"。
+    //  · 比例一致 → 取到的就是整张源图（一个像素都不裁）→ "整张(铺满)"；
+    //  · 比例不一致（框被拉高/压扁）→ 取源图内部正中那一块 → "取中间块"。
+    // 上一版那层"同一张照片的模糊版本补边"整条删掉了（用户真机上看到块状色块）。
 
     @Test
-    fun whenTheRatiosMatchTheWholePhotoIsShownAndTheBoxIsFilled() {
+    fun whenTheRatiosMatchTheWholeSourceIsUsedAndNothingIsCropped() {
         // 用户按裁剪框裁出来的图（最常见的一档）：594×189 的框 vs 720×229 的图。
-        // 判定不是"浮点相等"，而是**窗口是否等于整张源图** —— dp→px 的取整余量因此被自动吸收：
+        // 判定不是"浮点相等"，而是**取块是否等于整张源图** —— dp→px 的取整余量因此被自动吸收：
         // 交叉相乘并不严格相等（720×189 = 136080 vs 594×229 = 136026），
-        // 但 round(229 × 594/189) = 720（正好是源宽）、min(229, round(720 ÷ 3.1428)) = 229，
-        // 于是窗口取到整张图：一个像素都不裁。
+        // 但 round(229 × 594/189) = 720（正好是源宽），于是取块取到整张图：一个像素都不裁。
         val l = PhotoFit.layout(720, 229, 594, 189)!!
         assertTrue("比例一致必须走'整张铺满'", l.whole)
-        assertEquals("背景窗口 = 整张源图", "720x229@(0,0)", l.window.toString())
+        assertEquals("取块 = 整张源图", "720x229@(0,0)", l.window.toString())
         assertEquals("产出逐值等于框宽", 594, l.outWidth)
         assertEquals("产出逐值等于框高", 189, l.outHeight)
         assertEquals("零留边", 0, l.padY)
         assertEquals("整张(铺满)", l.verdict)
-        // 这一档根本不需要背景：整张照片正好等于框，连一个像素的背景填充都不会画
-        assertEquals("整张照片铺满整框", "594x189@(0,0)", l.photo.toString())
-        assertFalse("比例一致 → 不画模糊底", l.backdrop)
-    }
-
-    @Test
-    fun whenTheBoxIsTallerThanThePhotoTheWholePanoramaIsShownOnABlurredBackdrop() {
-        // 9.17:1 的图进 6.7:1 的框（框比图"高"）：上一版在这里"从中间取一块"（左右各裁 124px），
-        // 用户看到的就是"照片被遮住了两边"。现在整张都在：宽顶满 917、高 = round(137 × 100/917) = 15，
-        // 上下居中在 y = (137 − 15) ÷ 2 = 61，空出来的上下两条边由同一张图的模糊版本填。
-        val l = PhotoFit.layout(917, 100, boxW, boxH)!!
-        assertFalse("比例不一致 → 整张居中 + 模糊底", l.whole)
-        assertEquals(boxW, l.outWidth)
-        assertEquals(boxH, l.outHeight)
-        assertEquals("一条平底色留白都没有", 0, l.padY)
-        assertEquals(0f, l.padShare, 0.0001f)
-        assertEquals("整张(居中+模糊底)", l.verdict)
-        assertEquals("整张照片：宽顶满、高按原比例", "917x100@(0,18)", l.photo.toString())
-        // 背景窗口与框同比例：宽 = round(100 × 917/137) = 669，左右各裁 (917 − 669) ÷ 2 = 124
-        assertEquals(669, l.window.width)
-        assertEquals(100, l.window.height)
-        assertEquals(124, l.window.x)
+        assertEquals("这一档也只有一个矩形（取块在源图坐标系里就是整张）", 0, l.window.x)
         assertEquals(0, l.window.y)
     }
 
     @Test
-    fun aSmallerSourceIsScaledUpToTheBoxWidthAndTheBackdropFillsTheRest() {
-        // 源图比框小（相册里的缩略图、或用户裁得很小）：整张被放大到框宽（917），
-        // 高 = round(137 × 20/200) = 14、上下居中；剩下那两条边由模糊底填 ——
-        // 既不是"图只占一小条 + 一片底色"，也不再裁掉任何东西。
-        val l = PhotoFit.layout(200, 20, boxW, boxH)!!
-        assertFalse(l.whole)
-        assertEquals("产出仍是框宽", boxW, l.outWidth)
-        assertEquals("产出仍是框高", boxH, l.outHeight)
-        assertEquals(0, l.padY)
-        assertEquals("整张照片：宽顶满、高按原比例", "917x92@(0,22)", l.photo.toString())
-        assertEquals("背景窗口 = 整高 20、宽 round(20 × 6.6934) = 134", 134, l.window.width)
-        assertEquals(20, l.window.height)
-        assertEquals("居中", 33, l.window.x)
+    fun aWiderSourceIsCroppedLeftAndRightButStillFillsTheBox() {
+        // 9.17:1 的图进 6.7:1 的框（框比图"高"）：保整高 100、宽 = round(100 × 917/137) = 669，
+        // 左右各裁 (917 − 669) ÷ 2 = 124。这一块被放大到 917×137 铺满 —— 画面里没有第二层。
+        val l = PhotoFit.layout(917, 100, boxW, boxH)!!
+        assertFalse("比例不一致 → 取中间块", l.whole)
+        assertEquals(boxW, l.outWidth)
+        assertEquals(boxH, l.outHeight)
+        assertEquals("一条平底色留白都没有", 0, l.padY)
+        assertEquals(0f, l.padShare, 0.0001f)
+        assertEquals("取中间块", l.verdict)
+        assertEquals("保整高、宽按框比例", "669x100@(124,0)", l.window.toString())
     }
 
     @Test
-    fun theWholePhotoIsAlwaysInsideTheBoxAndNothingIsEverCropped() {
-        // 这一条是本轮的核心不变量（用户："下方图片显示依然有被遮住一小部分的问题"），
-        // 直接把"照片 × 框"的各种组合扫一遍：
+    fun aSourceSmallerThanTheBoxIsStillTakenFromTheCentreAndFillsTheBox() {
+        // 源图比框小（相册里的缩略图、或用户裁得很小）：取块 134×20（保整高、宽 = round(20 × 6.6934)），
+        // 左右居中在 x = round((200 − 134) ÷ 2) = 33；然后**放大**到 917×137 铺满 ——
+        // 既不是"图只占一小条 + 一片底色"，也不再裁掉整张里的任何东西（小图本来就全在里面）。
+        val l = PhotoFit.layout(200, 20, boxW, boxH)!!
+        assertFalse("源图比框小也走取中间块（比例不一致）", l.whole)
+        assertEquals("产出仍是框宽", boxW, l.outWidth)
+        assertEquals("产出仍是框高", boxH, l.outHeight)
+        assertEquals(0, l.padY)
+        assertEquals("保整高、宽按框比例", "134x20@(33,0)", l.window.toString())
+    }
+
+    @Test
+    fun everySourceIsCroppedOnlyInsideItselfAndTheBoxIsAlwaysFilled() {
+        // 这一条是整轮的核心不变量，直接把"照片 × 框"的各种组合扫一遍：
         //  · 产出宽高**逐值等于框**（宿主 fitCenter = 恒等变换，画面完全由我们决定）；
-        //  · **整张照片的矩形永远在框里**（不越界）—— 这就是"一个像素都不被遮住"的判据；
-        //  · 照片矩形与源图同比例（不拉伸）、居中；
-        //  · `留边=0`：照片区里不会出现平底色（铺满时是照片本身，不铺满时是它的模糊版本）。
+        //  · **取块永远在源图里**（不越界 → `createBitmap` 不会抛异常把 provider 拖挂）；
+        //  · 取块与框同比例（缩到框里不变形）；
+        //  · 取块"尽可能大"：至少有一条边保住了源图的整条边；
+        //  · 居中（左右/上下余量之差 ≤ 1px）；
+        //  · 比例一致 ⇔ 取到整张源图（一个像素都不裁）⇔ 日志写「整张(铺满)」，否则「取中间块」。
         val sources = listOf(
             intArrayOf(720, 229), intArrayOf(1600, 900), intArrayOf(1440, 3587),
             intArrayOf(2000, 274), intArrayOf(917, 100), intArrayOf(200, 20),
@@ -250,42 +259,44 @@ class PhotoFitTest {
             assertEquals("源=$s 框=$b：产出宽必须逐值等于框宽", b[0], l.outWidth)
             assertEquals("源=$s 框=$b：产出高必须逐值等于框高", b[1], l.outHeight)
             assertEquals("源=$s 框=$b：不该有任何平底色留白", 0, l.padY)
-            // 整张照片必须**完整地落在框里** —— 越界就是"被遮住"
-            val p = l.photo
+            // 取块必须完整落在源图里 —— 越界就是崩溃
+            val w = l.window
             assertTrue(
-                "源=$s 框=$b：整张照片越出框了 photo=$p",
-                p.width >= 1 && p.height >= 1 &&
-                    p.x >= 0 && p.y >= 0 &&
-                    p.x + p.width <= b[0] && p.y + p.height <= b[1]
+                "源=$s 框=$b：取块越出源图了 window=$w",
+                w.width >= 1 && w.height >= 1 &&
+                    w.x >= 0 && w.y >= 0 &&
+                    w.x + w.width <= s[0] && w.y + w.height <= s[1]
             )
-            // 照片矩形与源图同比例（不拉伸）。退化源图（短边 1~2px）不参与这一条：
-            // 那种尺寸下矩形只能是 1px，比例必然对不上（真实照片不可能这么小）。
+            // "尽可能大"：保住整高或整宽（不可能两条边都被裁）
+            assertTrue(
+                "源=$s 框=$b：取块不是最大的那一块 window=$w",
+                w.width == s[0] || w.height == s[1]
+            )
+            // 比例一致 ⇔ 取到整张
+            val sameRatio = w.width == s[0] && w.height == s[1]
+            assertEquals("源=$s 框=$b：结论与'取到整张'必须一致", sameRatio, l.whole)
+            assertEquals(
+                "源=$s 框=$b：日志那句话",
+                if (sameRatio) "整张(铺满)" else "取中间块",
+                l.verdict
+            )
+            // 取块与框同比例（不拉伸）。退化源图（短边 1~2px）不参与这一条：
+            // 那种尺寸下取块只能是 1px，比例必然对不上（真实照片不可能这么小）。
             if (s[0] >= 3 && s[1] >= 3) {
-                val lhs = p.width.toLong() * s[1]
-                val rhs = s[0].toLong() * p.height
+                val lhs = w.width.toLong() * b[1]
+                val rhs = b[0].toLong() * w.height
                 assertTrue(
-                    "源=$s 框=$b：照片被拉伸了（交叉相乘差 ${Math.abs(lhs - rhs)}）",
-                    Math.abs(lhs - rhs) <= maxOf(s[0], s[1]).toLong()
-                )
-            }
-            // 居中：左右/上下余量之差最多 1px（取整）
-            val padLeft = p.x
-            val padRight = b[0] - p.width - p.x
-            val padTop = p.y
-            val padBottom = b[1] - p.height - p.y
-            assertTrue("源=$s 框=$b：照片水平没居中 $padLeft/$padRight", Math.abs(padLeft - padRight) <= 1)
-            assertTrue("源=$s 框=$b：照片竖直没居中 $padTop/$padBottom", Math.abs(padTop - padBottom) <= 1)
-            // 背景窗口（画模糊底用的那块）必须与框同比例，否则背景自己就是拉伸的。
-            // 判据用**整数交叉相乘 + 1px 量级的容差**，而不是比值 —— 比值的相对误差在小窗口上
-            // 会被放大到没意义。
-            if (l.backdrop && s[0] >= 3 && s[1] >= 3) {
-                val lhs = l.window.width.toLong() * b[1]
-                val rhs = b[0].toLong() * l.window.height
-                assertTrue(
-                    "源=$s 框=$b：背景窗口与框不同比例（交叉相乘差 ${Math.abs(lhs - rhs)}）",
+                    "源=$s 框=$b：取块与框不同比例（交叉相乘差 ${Math.abs(lhs - rhs)}）",
                     Math.abs(lhs - rhs) <= maxOf(b[0], b[1]).toLong()
                 )
             }
+            // 居中：左右/上下余量之差最多 1px（取整）
+            val padLeft = w.x
+            val padRight = s[0] - w.width - w.x
+            val padTop = w.y
+            val padBottom = s[1] - w.height - w.y
+            assertTrue("源=$s 框=$b：取块水平没居中 $padLeft/$padRight", Math.abs(padLeft - padRight) <= 1)
+            assertTrue("源=$s 框=$b：取块竖直没居中 $padTop/$padBottom", Math.abs(padTop - padBottom) <= 1)
             checked++
         }
         assertEquals("组合数变了说明覆盖范围变了（有意改的才动这个数）", sources.size * boxes.size, checked)
@@ -308,8 +319,8 @@ class PhotoFitTest {
         assertEquals(594, l.outWidth)
         assertEquals("产出逐值等于框高（铺满）", 189, l.outHeight)
         assertEquals(0, l.padY)
-        assertEquals("整张都在", "720x229@(0,0)", l.window.toString())
-        assertEquals("整张照片铺满整框（这一档连背景都不画）", "594x189@(0,0)", l.photo.toString())
+        assertEquals("整张都在（一个像素都不裁）", "720x229@(0,0)", l.window.toString())
+        assertEquals("整张(铺满)", l.verdict)
     }
 
     // ---------------------------------------------------------------- 4. 永不越界 / 覆盖各种比例
@@ -335,7 +346,7 @@ class PhotoFitTest {
             val it = l!!
             val w = it.window
             assertTrue(
-                "越界：源=${s[0]}x${s[1]} 框=${b[0]}x${b[1]} 窗口=$w",
+                "越界：源=${s[0]}x${s[1]} 框=${b[0]}x${b[1]} 取块=$w",
                 w.width >= 1 && w.height >= 1 &&
                     w.x >= 0 && w.y >= 0 &&
                     w.x + w.width <= s[0] && w.y + w.height <= s[1]
@@ -343,14 +354,6 @@ class PhotoFitTest {
             assertTrue("产出不能塌成 0：$it", it.outWidth >= 1 && it.outHeight >= 1)
             assertEquals("产出宽必须逐值等于框宽", b[0], it.outWidth)
             assertEquals("产出高必须逐值等于框高", b[1], it.outHeight)
-            // 整张照片也必须落在框里 —— 这是"不被遮住"判据的另一半
-            val p = it.photo
-            assertTrue(
-                "整张照片越出框：源=${s[0]}x${s[1]} 框=${b[0]}x${b[1]} photo=$p",
-                p.width >= 1 && p.height >= 1 &&
-                    p.x >= 0 && p.y >= 0 &&
-                    p.x + p.width <= b[0] && p.y + p.height <= b[1]
-            )
             checked++
         }
         assertEquals(
@@ -372,12 +375,7 @@ class PhotoFitTest {
         assertNull(PhotoFit.layout(1000, 1000, Int.MIN_VALUE, boxH))
         assertNull(PhotoFit.centerWindow(0, 100, boxW, boxH))
         assertNull(PhotoFit.centerWindow(1000, 1000, boxW, 0))
-        // 整张照片那条路同样不能给出会崩/越界的矩形
-        assertNull(PhotoFit.containRect(0, 100, boxW, boxH))
-        assertNull(PhotoFit.containRect(100, 0, boxW, boxH))
-        assertNull(PhotoFit.containRect(1000, 1000, 0, boxH))
-        assertNull(PhotoFit.containRect(1000, 1000, boxW, 0))
-        assertNull(PhotoFit.containRect(-5, 1000, boxW, boxH))
+        assertNull(PhotoFit.centerWindow(-5, 1000, boxW, boxH))
     }
 
     @Test
@@ -387,6 +385,9 @@ class PhotoFitTest {
         // 所以断言也必须从那条链路走一遍。
         // 字节数按 2 字节/像素算 —— 这是**解码后强制转 RGB_565** 之后才成立的前提
         // （见 PhotoBitmap 的类注释：inPreferredConfig 只是建议，带 alpha 的 PNG 会给 ARGB_8888）。
+        //
+        // 注意：预算**没有**因为"框里少画了一层背景"而放宽（[PhotoBitmap.MAX_BITMAP_BYTES] 仍是
+        // 600KB）—— 它算的是 binder 事务余量，与画面有几层无关；产出尺寸也没变（还是整框）。
         val density = 2.625f
         var checked = 0
         for (dpBox in listOf(
@@ -491,19 +492,19 @@ class PhotoFitTest {
         assertEquals(
             "框=349x52dp 比例=6.71:1 照片比例=0.40:1 需要的框高=150dp " +
                 "裁剪框=349:136dp(2.57:1) 源=1440x3587(0.40:1) " +
-                "照片=55x137@(431,0) 整张(居中+模糊底) 底窗=1440x215@(0,1686) 行数=1 " +
+                "取中间块 取块=1440x215@(0,1686) 留边=0px(0%) 行数=1 " +
                 "bitmap=917x137 byteCount=251258B(245KB) config=RGB_565 " +
                 "圆角=26px 角填色=#FFFFFFFF 角像素=#FFFFFFFF 底部零头=0dp",
             label
         )
         // 这几个 token 是给用户（和以后的我）按图索骥用的，缺一列就少一个判据。
-        // `照片=` 是本轮加的：它是**整张照片落在框里的矩形**，用户拿截图量"照片有没有被遮住"
-        // 就对这一列（比例不一致那一档打的是 `底窗=`，即模糊底从源图上取的那一块）；
+        // `取块=` 是本轮改的：它是**从源图上取的那一块**，用户拿它核对"我的照片被裁掉了哪一块"
+        //（比例一致时它逐值等于 `源=`，也就是一个像素都没裁）；
         // `圆角=` / `角填色=` / `角像素=` / `底部零头=` 是上一轮加的（`角像素=` 是遮罩之后
         // **实测读回来**的角落颜色 —— 用户拿截图取像素对的就是它）
         for (token in listOf(
-            "框=", "比例=", "照片比例=", "需要的框高=", "裁剪框=", "整张(居中+模糊底)",
-            "照片=", "底窗=", "行数=", "bitmap=", "byteCount=", "config=",
+            "框=", "比例=", "照片比例=", "需要的框高=", "裁剪框=", "取中间块",
+            "取块=", "留边=", "行数=", "bitmap=", "byteCount=", "config=",
             "圆角=", "角填色=", "角像素=", "底部零头="
         )) {
             assertTrue("日志缺少 $token：$label", label.contains(token))
@@ -515,7 +516,7 @@ class PhotoFitTest {
      * `框=226x72dp 照片比例=3.14:1 需要的框高=72dp 留边=0px 行数=2` 的一行"）。
      *
      * 这一条把**两条"没有空白"的结论**与日志文本一起钉死：
-     *  - `留边=0px(0%)` —— 照片区内部没有留白；
+     *  - `留边=0px(0%)` —— 照片区内部没有留白（框里只画一层铺满的照片，结构上必为 0）；
      *  - `底部零头=0dp` —— 图片框下方的组件底部也没有留白（本轮修的那条）。
      * 真机上只要这两列里有一列不是 0，就说明对应的规则被人改回去了。
      */
@@ -546,7 +547,7 @@ class PhotoFitTest {
         assertEquals(
             "框=226x72dp 比例=3.14:1 照片比例=3.14:1 需要的框高=72dp " +
                 "裁剪框=226:72dp(3.14:1) 源=720x229(3.14:1) " +
-                "照片=594x189@(0,0) 整张(铺满) 留边=0px(0%) 行数=1 " +
+                "整张(铺满) 取块=720x229@(0,0) 留边=0px(0%) 行数=1 " +
                 "bitmap=594x189 byteCount=224532B(219KB) config=RGB_565 " +
                 "圆角=26px 角填色=#FFFFFFFF 角像素=#FFFFFFFF 底部零头=0dp",
             label
@@ -565,35 +566,79 @@ class PhotoFitTest {
     }
 
     @Test
-    fun renderLabelSwitchesToTheWholeVerdictAndReportsThePadding() {
-        // 完整显示那一档：226:72 的裁剪图，框 226×72dp（594×189px）→ 零留边
-        val l = PhotoFit.layout(720, 229, 594, 189)!!
-        val facts = RenderFacts(
-            l, 720, 229, 594, 189, 594 * 189 * 2, "RGB_565",
-            cornerRadiusPx = 26, cornerFillArgb = 0xFFFFFFFF.toInt(),
-            cornerPixelArgb = 0xFFFFFFFF.toInt()
-        )
-        val label = PhotoBitmap.renderLabel(
-            facts = facts,
-            frame = PhotoCrop.frame(226, 72),
-            boxWidthDp = 226,
-            boxHeightDp = 72,
-            wantedHeightDp = WidgetData.photoWantedHeightDp(226, 720f / 229f),
-            rows = 1,
-            photoRatioLabel = PhotoBitmap.ratioLabel(720, 229),
-            leftoverDp = 0
-        )
-        assertEquals(
-            "框=226x72dp 比例=3.14:1 照片比例=3.14:1 需要的框高=72dp " +
-                "裁剪框=226:72dp(3.14:1) 源=720x229(3.14:1) " +
-                "照片=594x189@(0,0) 整张(铺满) 留边=0px(0%) 行数=1 " +
-                "bitmap=594x189 byteCount=224532B(219KB) config=RGB_565 " +
-                "圆角=26px 角填色=#FFFFFFFF 角像素=#FFFFFFFF 底部零头=0dp",
-            label
-        )
-        assertTrue("铺满那一档必须打出留边", label.contains("留边="))
-        // 本轮的规则：铺满那一档的留边**就是 0**（铺满 = 照片自己就是整块区域，没有背景填充）
-        assertTrue("铺满必须零留边", label.contains("留边=0px(0%)"))
+    fun renderLabelSwitchesToTheCentreSliceVerdictAndAlwaysReportsThePadding() {
+        // 两条分支的日志差异只有一处：结论那句（`整张(铺满)` / `取中间块`）。
+        // `取块=` 与 `留边=` 两列**两档都要有** —— 上一版是非铺满档只打模糊底那个窗口、
+        // 不留 `留边=`，那是为背景层留的口子；这一版背景层没了，任何一档都不该缺列。
+        fun labelOf(l: PhotoFit.Layout, boxW: Int, boxH: Int, srcW: Int, srcH: Int): String =
+            PhotoBitmap.renderLabel(
+                facts = RenderFacts(
+                    l, srcW, srcH, l.outWidth, l.outHeight,
+                    l.outWidth * l.outHeight * PhotoBitmap.BYTES_PER_PIXEL, "RGB_565"
+                ),
+                frame = PhotoCrop.frame(boxW, boxH),
+                boxWidthDp = boxW,
+                boxHeightDp = boxH,
+                wantedHeightDp = WidgetData.photoWantedHeightDp(boxW, srcW.toFloat() / srcH.toFloat()),
+                rows = 1,
+                photoRatioLabel = PhotoBitmap.ratioLabel(srcW, srcH),
+                leftoverDp = 0
+            )
+
+        // 比例一致那一档：720×229 的源图进 594×189 的框 → 取到整张源图
+        val a = labelOf(PhotoFit.layout(720, 229, 594, 189)!!, 226, 72, 720, 229)
+        assertTrue("铺满那一档必须打出取块：$a", a.contains("取块=720x229@(0,0)"))
+        assertTrue("铺满那一档必须打出留边：$a", a.contains("留边=0px(0%)"))
+        assertTrue("铺满那一档的结论是「整张(铺满)」：$a", a.contains("整张(铺满)"))
+
+        // 取中间块那一档：真机那张 1440×3587 的竖屏截图进 917×137 的框 → 取块 1440×215@(0,1686)
+        val b = labelOf(PhotoFit.layout(1440, 3587, 917, 137)!!, 349, 52, 1440, 3587)
+        assertTrue("取中间块那一档要打的是**取块**：$b", b.contains("取块=1440x215@(0,1686)"))
+        assertTrue("取中间块那一档同样要打留边：$b", b.contains("留边=0px(0%)"))
+        assertTrue("结论必须是「取中间块」：$b", b.contains("取中间块"))
+        assertFalse("这一档不能再出现「整张(铺满)」：$b", b.contains("整张(铺满)"))
+    }
+
+    @Test
+    fun theVerdictOnlyEverSaysTwoThingsAndNeverMentionsTheRemovedBackdrop() {
+        // 日志是用户唯一的判据（他看不到画面）。这一条把"那套字样彻底没了"钉死在**输出**上：
+        // 两档日志正文 + 诊断页那行布局代号（[WidgetData.LAYOUT_MARKER]）里都不许出现
+        // 模糊底时代的那几个词 —— 用户就是靠"日志里搜不到这些字样"来确认它真的删干净了。
+        val cases = listOf(
+            // 源图（照片）与框（组件图片区这一轮分到的那块像素）
+            intArrayOf(720, 229, 594, 189),      // 比例一致 → 整张铺满
+            intArrayOf(1440, 3587, 917, 137),    // 竖屏截图 → 取中间块
+            intArrayOf(917, 100, 917, 137),      // 扁全景 → 取中间块（左右各裁一条）
+            intArrayOf(1600, 900, 917, 137)      // 横片 → 取中间块（上下各裁一条）
+        ).map { c ->
+            val l = PhotoFit.layout(c[0], c[1], c[2], c[3])!!
+            PhotoBitmap.renderLabel(
+                facts = RenderFacts(
+                    l, c[0], c[1], c[2], c[3],
+                    c[2] * c[3] * PhotoBitmap.BYTES_PER_PIXEL, "RGB_565"
+                ),
+                frame = PhotoCrop.frame(349, 52),
+                boxWidthDp = 349,
+                boxHeightDp = 52,
+                wantedHeightDp = 150,
+                rows = 1,
+                photoRatioLabel = PhotoBitmap.ratioLabel(c[0], c[1]),
+                leftoverDp = 0
+            )
+        } + WidgetData.LAYOUT_MARKER
+
+        for (label in cases) {
+            for (token in listOf("模糊", "底窗", "居中+模糊底")) {
+                assertFalse("日志里还能搜到「$token」：$label", label.contains(token))
+            }
+            // 结论那一段只允许这两种说法（诊断页那行代号除外）
+            if (label != WidgetData.LAYOUT_MARKER) {
+                assertTrue(
+                    "结论那一段只能是「整张(铺满)」或「取中间块」：$label",
+                    label.contains("整张(铺满)") || label.contains("取中间块")
+                )
+            }
+        }
     }
 
     @Test
@@ -618,7 +663,46 @@ class PhotoFitTest {
         assertFalse(PhotoCrop.frame(226, 72).fallback)
     }
 
-    // ---------------------------------------------------------------- 7. 渲染链路与布局必须同源
+    // ------------------------------------------------- 7. "框里只有一层"的源码级证据
+
+    /**
+     * **用户问的那句"还有没有地方会画第二层背景"，这一条就是答案的书面形式**。
+     *
+     * 单测里 `Canvas`/`Bitmap` 全是"返回默认值"的假实现，一次真绘制都发生不了 ——
+     * 所以"画了几层"只能靠源码级计数来证：整个 widget 包里**有且只有一次** `drawBitmap(`，
+     * 就是 [PhotoBitmap.decode] 里"取块铺满整框"的那一次；四角遮罩画的是 `drawPath` / `drawArc`
+     * （那是**填角**，不是背景层），而 `createScaledBitmap` 只剩 [PhotoBitmap] 里 fitBudget
+     * 那一次（超预算时的等比缩小），decode 的正文里一次都没有 —— 模糊底那两行再也回不来了。
+     */
+    @Test
+    fun onlyOneLayerIsEverDrawnAndNoBackdropArtifactsRemain() {
+        val files = widgetSourceDir().listFiles { f -> f.name.endsWith(".kt") }?.toList().orEmpty()
+        assertTrue("应当能找到 widget 包下的源码（否则这个测试是假绿）", files.size >= 5)
+
+        // ① 整个包里只有一次绘制位图（= decode 里那一层）
+        val draws = files.sumOf { f -> Regex("drawBitmap\\(").findAll(f.readText()).count() }
+        assertEquals("widget 包里只允许有一次 drawBitmap（框里只画一层）", 1, draws)
+
+        // ② 模糊底那套标识符/列名彻底不存在（字段、常量、日志列名一个都不许留）
+        for (token in listOf("BLUR_DIVISOR", "backdrop", "底窗=", "blurW", "blurH", "blur(")) {
+            for (f in files) {
+                assertFalse("${f.name} 里还有模糊底的残留 $token", f.readText().contains(token))
+            }
+        }
+
+        // ③ decode 的正文里不许再出现"缩小再放大"那种做法
+        val src = photoBitmapSource()
+        val decodeBody = src.substringAfter("fun decode(").substringBefore("}.onFailure {")
+        assertTrue("decode 的正文没有截到（锚点变了？这个测试就白测了）", decodeBody.length > 500)
+        assertEquals("decode 里只允许画一次", 1, Regex("drawBitmap\\(").findAll(decodeBody).count())
+        assertEquals(
+            "decode 里不许再出现 createScaledBitmap（模糊底就是靠它缩小再放大的）",
+            0,
+            Regex("createScaledBitmap\\(").findAll(decodeBody).count()
+        )
+        // ④ 只有一次画布：多一块 Canvas(produced) 就等于多一层
+        assertEquals("decode 里只允许开一块画布", 1, Regex("Canvas\\(").findAll(decodeBody).count())
+    }
 
     @Test
     fun layoutScaleTypeIsCentredSoBothBranchesStayUntouchedByTheHost() {
@@ -651,11 +735,7 @@ class PhotoFitTest {
         // 布局已经写死 fitCenter（对两条分支都是恒等/零裁变换），运行时再 setInt("setScaleType")
         // 就是纯冗余：多一条 RemoteViews 指令、多一个"宿主不支持"的失败模式。这一轮删掉了它，
         // 这条测试防止它被误加回来（加了就必须同时改布局与这条断言）。
-        val dir = listOf(
-            File("src/main/java/app/timetable/widget"),
-            File("app/src/main/java/app/timetable/widget")
-        ).firstOrNull { it.isDirectory } ?: error("找不到 widget 源码目录（测试工作目录假设有变）")
-        val files = dir.listFiles { f -> f.name.endsWith(".kt") }?.toList().orEmpty()
+        val files = widgetSourceDir().listFiles { f -> f.name.endsWith(".kt") }?.toList().orEmpty()
         assertTrue("应当能找到 widget 包下的源码（否则这个测试是假绿）", files.size >= 5)
         for (f in files) {
             assertFalse(
@@ -668,7 +748,9 @@ class PhotoFitTest {
     @Test
     fun whatIsNotCoveredHere() {
         // 这份文件里**没有**、也不可能有的东西（写下来免得下次误以为覆盖了）：
-        //  1. 真 Bitmap 的裁剪 + 缩放（PhotoBitmap.slice / scaleTo）：需要真 Android 运行时；
+        //  1. 真 Bitmap 的取块 + 缩放（PhotoBitmap.slice + decode 里那次 drawBitmap）：
+        //     需要真 Android 运行时 —— "画了几层"这里只做得到**源码级**计数
+        //     （[onlyOneLayerIsEverDrawnAndNoBackdropArtifactsRemain]），不是画面级证据；
         //  2. **四角圆角遮罩那一步画布**（PhotoBitmap.maskCorners 里的 Canvas.drawPath）：
         //     单测里 Canvas/Path 都是"返回默认值"的假实现，只能验它的几何（见 PhotoCornerMaskTest）
         //     与"真的画上去了没有"（真机日志的 `圆角=..px` / `角填色=#..` 两列 + 截图取像素）；
