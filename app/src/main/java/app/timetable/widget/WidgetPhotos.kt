@@ -56,9 +56,9 @@ internal object WidgetPhotos {
      * 返回**本次新导入且被保留**的路径（调用方拿 `size` 当"本次新增几张"显示）；
      * `Prefs.photoUris` 里是合并后的完整列表。
      *
-     * 取舍（这里以前是坏的）：**满 5 张之后，新选的优先留下**，挤掉最旧的。
-     * 原来的循环在 `existing.size >= MAX_PHOTOS` 时直接 break，于是"已经 5 张时再挑 1~3 张"
-     * 一张都进不来，作者本意写的 `takeLast(5)` 永远没机会生效：组件还是老 5 张、
+     * 取舍（这里以前是坏的）：**满上限之后，新选的优先留下**，挤掉最旧的。
+     * 原来的循环在 `existing.size >= MAX_PHOTOS` 时直接 break，于是"已经满时再挑 1~3 张"
+     * 一张都进不来，作者本意写的 `takeLast(max)` 永远没机会生效：组件还是老那几张、
      * Toast 却说「已导入 5 张图片」，反复重试都无效（只能先「清除图片」）。
      * 同时返回值以前是**全部**路径，调用方用 `size` 显示，就把"库存 5 张"说成了"本次导入 5 张"。
      *
@@ -185,6 +185,114 @@ internal object WidgetPhotos {
     fun clear(context: Context) {
         runCatching { dir(context).listFiles()?.forEach { it.delete() } }
         Prefs.photoUris = ""
+    }
+
+    // ------------------------------------------------------------ 删除（用户自己挑）
+
+    /**
+     * 当前的**记录**（`Prefs.photoUris` 按行拆开，去掉空行）。
+     *
+     * 刻意**不过滤"文件是否还在"**：管理界面要按记录逐格显示（文件丢了的格子显示成"已丢失"，
+     * 用户还能把它删掉），而"按下标删除"只有在"界面看到的下标"与"记录下标"逐一对应时才正确
+     * —— 中间偷偷过滤掉一项，用户点的第 3 格就会删掉第 4 张。这是最容易出、又最难查的一类 off-by-one。
+     */
+    fun recorded(context: Context): List<String> =
+        Prefs.photoUris.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+
+    /**
+     * 纯函数（可单测）：按**下标**删掉若干张，返回剩下的记录。
+     *
+     * 越界下标直接忽略（界面状态与磁盘状态可能不同步，宁可少删也不要抛）；
+     * 重复下标无副作用；空集合原样返回。
+     */
+    fun keepAfterRemoval(all: List<String>, removeIndices: Collection<Int>): List<String> {
+        if (removeIndices.isEmpty()) return all
+        val drop = removeIndices.filter { it >= 0 && it < all.size }.toHashSet()
+        return all.filterIndexed { index, _ -> index !in drop }
+    }
+
+    /** 纯函数（可单测）：按**路径**删掉若干张（自检、以及"按路径"的调用点用） */
+    fun keepAfterRemovalByPath(all: List<String>, removePaths: Collection<String>): List<String> {
+        if (removePaths.isEmpty()) return all
+        val drop = removePaths.toHashSet()
+        return all.filter { it !in drop }
+    }
+
+    /**
+     * 删掉指定的几张：**先改记录、再删文件**，返回真正从记录里删掉的张数。
+     *
+     * 顺序为什么不能反：删文件是不可逆的，而"记录里还剩谁"是可重算的。若先删文件再改记录，
+     * 中途被打断（进程被杀、权限异常）就会留下"记录指向已不存在的文件"—— 界面上一格空白、
+     * 用户以为没删掉，再删一次还是空白。反过来则最多留下几个孤儿文件，而 [prune] 下次会收拾。
+     *
+     * 调用方负责刷新（`TodayWidgetProvider.refreshAll`）：
+     * "现在显示第几张"由 [PhotoCursor] 自己夹回合法范围（它从不直接使用存值），
+     * 所以删到只剩一张、甚至清空，都不会越界。
+     */
+    fun removeAt(context: Context, indices: Collection<Int>): Int {
+        val all = recorded(context)
+        val keep = keepAfterRemoval(all, indices)
+        if (keep.size == all.size) return 0
+        Prefs.photoUris = keep.joinToString("\n")
+        val keepSet = keep.toHashSet()
+        for (path in all) {
+            if (path !in keepSet) runCatching { File(path).delete() }
+        }
+        return all.size - keep.size
+    }
+
+    /** 按路径删除（[removeAt] 的路径版本）。返回值同 [removeAt]。 */
+    fun remove(context: Context, paths: Collection<String>): Int {
+        val all = recorded(context)
+        val keep = keepAfterRemovalByPath(all, paths)
+        if (keep.size == all.size) return 0
+        Prefs.photoUris = keep.joinToString("\n")
+        val keepSet = keep.toHashSet()
+        for (path in all) {
+            if (path !in keepSet) runCatching { File(path).delete() }
+        }
+        return all.size - keep.size
+    }
+
+    /**
+     * **批量导入**：不逐张问用户，直接按图片区的形状居中裁剪（[PhotoCrop.centerCoverFraction]）。
+     *
+     * 为什么必须有不问的这条路：上限提到 50 张之后，"逐张裁剪"意味着点 50 次确认；
+     * 而这条路径产出的文件与"用户把照片放到最大并居中确认"**完全同形**
+     * （同一份 [PhotoCrop] 算术），所以体验差异只在"能不能自己微调"，不在结果一致性上。
+     *
+     * 必须在**后台线程**调用。一张读不出来就跳过它继续下一张（不因为一张坏图丢掉整批），
+     * 每处理完一张回调一次 [onProgress]（调用方据此更新"正在导入 n/m"）。
+     *
+     * @return 本次真正留在列表里的新增路径（被上限挤掉的不算 —— 与 [import] 同一套语义）
+     */
+    fun importAutoCropped(
+        context: Context,
+        uris: List<Uri>,
+        frame: CropFrame,
+        outWidth: Int,
+        outHeight: Int,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
+    ): List<String> {
+        val added = ArrayList<String>()
+        for ((index, uri) in uris.withIndex()) {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.use {
+                    BitmapFactory.decodeStream(it, null, bounds)
+                }
+            }
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                val fraction = PhotoCrop.centerCoverFraction(bounds.outWidth, bounds.outHeight, frame.ratio)
+                runCatching { saveCropped(context, uri, fraction, outWidth, outHeight) }
+                    .getOrNull()
+                    ?.let { added.add(it.absolutePath) }
+            } else {
+                Log.w(TAG, "批量导入跳过一张（读不出尺寸）uri=$uri")
+            }
+            onProgress(index + 1, uris.size)
+        }
+        return adopt(context, added)
     }
 
     /** 删掉不再引用的文件（换图后留下的孤儿） */

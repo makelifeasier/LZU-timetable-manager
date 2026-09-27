@@ -721,7 +721,7 @@ internal object WidgetData {
         return Prefs.photoEnabled && photoList(context).isNotEmpty()
     }
 
-    /** 已选图片的本地路径列表（最多 5 张） */
+    /** 已选图片的本地路径列表（最多 [MAX_PHOTOS] 张，按"最旧在前"排序） */
     fun photoList(context: Context): List<String> {
         Prefs.init(context)
         val raw = Prefs.photoUris
@@ -804,8 +804,19 @@ internal object WidgetData {
     const val PHOTO_MIN_DP = 56
     const val PHOTO_MAX_DP = 150
 
-    /** 最多几张图片 */
-    const val MAX_PHOTOS = 5
+    /**
+     * 最多几张图片。
+     *
+     * 从 5 提到 50（用户要求"调到 50 张"）。为什么提到 50 不会把组件拖垮：图片区**永远只显示
+     * 一张**（当前那张，由 [PhotoCursor] 决定），张数只影响三处 ——
+     *  1. `photoUris` 这个字符串的长度（每行一个绝对路径，50 行也就几 KB）；
+     *  2. 设置页缩略图网格的解码量（一次最多 50 张小图，见 `ui/PhotoManagerDialog`）；
+     *  3. 每张存盘文件几十~几百 KB，50 张约十几 MB（都在 App 私有目录，卸载即清）。
+     *
+     * 这三处都不在 `RemoteViews` 的 binder 预算上：过 binder 的始终只有**当前显示的那一张**。
+     * 上限只用于"满了之后新图挤掉最旧的"（见 [WidgetPhotos.keepAfterImport]），不是安全边界。
+     */
+    const val MAX_PHOTOS = 50
 
     /**
      * 列表高度（dp）= 整行数 × 实测行高。

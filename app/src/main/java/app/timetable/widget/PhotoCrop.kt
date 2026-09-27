@@ -281,6 +281,44 @@ internal object PhotoCrop {
     }
 
     /**
+     * 纯函数（可单测）：**不问用户**、直接算出"按图片区形状居中裁"的那块矩形。
+     *
+     * 为什么需要它：一次导入几十张图时（上限已提到 50 张），逐张弹裁剪界面等于让用户点 50 次，
+     * 现实里没人会这么用。批量导入走这条路径 —— 结果与"用户把照片放到最大、居中确认"
+     * 完全一样（[sourceFraction] 在 `scale = 刚好盖住框`、`dx/dy = 居中` 时的闭式解），
+     * 所以批量导入的图与手动裁的图**同形**，点一下换下一张不会变形（[PhotoBitmap.photoAspect] 靠这个前提）。
+     *
+     * 取法是"最大能放下的、比例等于框的居中矩形"：
+     *  - 图比框更宽 → 左右填满、上下居中切一条；
+     *  - 图比框更窄（竖图/方图）→ 上下填满、左右居中切一条。
+     * 两个分支都保证矩形**完全落在图内**（这正是"绝不露白"的由来）。
+     *
+     * @param frameRatio 裁剪框的宽 : 高（[CropFrame.ratio]）
+     * @return 归一化矩形 `[fx, fy, fw, fh]`，与 [sourceFraction] 同坐标系，可直接交给
+     *         [pixelRect] / [WidgetPhotos.saveCropped]；入参非法时返回整张（`[0,0,1,1]`），
+     *         宁可"不裁"也不要算出 NaN 把存盘搞崩。
+     */
+    fun centerCoverFraction(imgW: Int, imgH: Int, frameRatio: Float): FloatArray {
+        val full = floatArrayOf(0f, 0f, 1f, 1f)
+        if (imgW <= 0 || imgH <= 0) return full
+        val r = if (frameRatio.isNaN() || frameRatio <= 0f) return full else frameRatio
+
+        val imgRatio = imgW.toFloat() / imgH.toFloat()
+        val fw: Float
+        val fh: Float
+        if (imgRatio > r) {
+            // 图更宽：高度用满，宽度按框的比例取
+            fh = 1f
+            fw = ((imgH.toFloat() * r) / imgW.toFloat()).coerceIn(0f, 1f)
+        } else {
+            // 图更窄/一样：宽度用满，高度按框的比例取
+            fw = 1f
+            fh = ((imgW.toFloat() / r) / imgH.toFloat()).coerceIn(0f, 1f)
+        }
+        return floatArrayOf((1f - fw) / 2f, (1f - fh) / 2f, fw, fh)
+    }
+
+    /**
      * 纯函数（可单测）：归一化矩形 → 某张已经解码好的位图上的**像素**矩形 `[x, y, w, h]`。
      *
      * 这里的每一条 `coerce` 都对应一次真实崩溃：`Bitmap.createBitmap` 的

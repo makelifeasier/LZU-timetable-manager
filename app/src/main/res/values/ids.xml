@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  代码里动态创建控件时用的 id。
+
+  为什么单独列一个文件：图片管理界面（ui/PhotoManagerDialog）的格子是**在代码里拼**出来的
+  （格数随照片张数变化，写不成布局），而"找到格子里的缩略图 / 选中标记"要靠 id。
+  在这里声明 id 比 `View.generateViewId()` 好在：id 是固定的，日志、uiautomator dump、
+  自检都能按同一个名字定位同一个控件。
+-->
+<resources>
+    <!-- 格子里的缩略图（文件丢失时这一格是显示「已丢失」的 TextView） -->
+    <item name="photo_manager_thumb" type="id" />
+
+    <!-- 格子右上角的选中标记（✓），选中时才 VISIBLE -->
+    <item name="photo_manager_check" type="id" />
+</resources>

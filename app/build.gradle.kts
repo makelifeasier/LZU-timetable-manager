@@ -21,8 +21,10 @@ android {
         applicationId = "app.timetable"
         minSdk = 31
         targetSdk = 36
-        versionCode = 27
-        versionName = "3.3"
+        // 3.3 已经作为公开发布版存在（Release v3.3 的包不可替换），所以新增功能必须换号：
+        // 否则"设置里能看到 v3.3"这一点就无法区分"装的是不是有管理图片的那一版"。
+        versionCode = 28
+        versionName = "3.4"
     }
 
     signingConfigs {

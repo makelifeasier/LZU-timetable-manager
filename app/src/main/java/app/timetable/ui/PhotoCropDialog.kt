@@ -502,6 +502,30 @@ internal class PhotoCropDialog private constructor(
         private const val SCRIM = 0xB3000000.toInt()
 
         /**
+         * 一次导入要用到的两个量：**框的形状**与**存盘尺寸**。
+         *
+         * 抽出来是因为现在有两条导入路径：逐张裁剪（[start]）与批量自动裁剪
+         * （`SettingsActivity` 里调 [WidgetPhotos.importAutoCropped]）。
+         * 两条路必须用**同一个**框 —— 否则"手动裁的图"与"自动裁的图"比例不同，
+         * 而图片区的框高是按第一张照片的比例定的（见 `PhotoBitmap.photoAspect`），
+         * 于是点一下换下一张就会看出变形。共用这一个函数就杜绝了这种分叉。
+         */
+        internal class CropPlan(val frame: CropFrame, val outWidth: Int, val outHeight: Int)
+
+        /**
+         * 算出当前组件尺寸下的裁剪框与存盘尺寸。
+         *
+         * `boxWidthPx`（组件要解码的像素宽）只影响存盘尺寸的下限，不影响框的形状。
+         */
+        fun plan(activity: Activity): CropPlan {
+            val frame = WidgetData.photoFrame(activity)
+            val density = activity.resources.displayMetrics.density
+            val boxPx = PhotoBitmap.targetPx(frame.widthDp, frame.heightDp, density)
+            val out = PhotoCrop.encodeSize(frame, boxPx[0])
+            return CropPlan(frame, out[0], out[1])
+        }
+
+        /**
          * 逐张弹出裁剪界面，全部处理完后回调"本次**真正留在列表里**的新文件路径"。
          *
          * 设置页的接法（与老的 `WidgetPhotos.import` 同一套语义）：
@@ -524,16 +548,15 @@ internal class PhotoCropDialog private constructor(
                 onFinished(saved)
                 return
             }
-            val frame = WidgetData.photoFrame(activity)
-            val density = activity.resources.displayMetrics.density
-            val boxPx = PhotoBitmap.targetPx(frame.widthDp, frame.heightDp, density)
-            val out = PhotoCrop.encodeSize(frame, boxPx[0])
+            val plan = plan(activity)
+            val frame = plan.frame
+            val out = intArrayOf(plan.outWidth, plan.outHeight)
             if (frame.fallback) {
                 Log.w(TAG, "裁剪帧取不到组件尺寸，按兜底 2:1 处理（部分启动器不上报 options）")
             }
             Log.i(
                 TAG,
-                "裁剪导入开始：${uris.size} 张 裁剪框=${frame.label} 组件要解码的宽=${boxPx[0]}px " +
+                "裁剪导入开始：${uris.size} 张 裁剪框=${frame.label} " +
                     "存盘尺寸=${out[0]}x${out[1]}"
             )
 

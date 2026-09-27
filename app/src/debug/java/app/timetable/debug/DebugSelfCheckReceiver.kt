@@ -67,7 +67,18 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_STYLECHECK -> styleCheck(context)
                 ACTION_FEATURECHECK -> featureCheck(context)
                 ACTION_SEED -> seedData(context)
-                ACTION_PHOTOSEED -> photoSeed(context, intent.getStringExtra("file"))
+                ACTION_PHOTOSEED -> photoSeed(
+                    context,
+                    intent.getStringExtra("file"),
+                    // `am broadcast -e n 8` 传进来的是**字符串** extra，getIntExtra 会拿不到值、
+                    // 静默退成默认值（自检里"设了 8 却只造了 2 张"就是这么来的）。
+                    // 两个都读，字符串优先。
+                    intent.getStringExtra("n")?.trim()?.toIntOrNull()
+                        ?: intent.getIntExtra("n", 2)
+                )
+                ACTION_PHOTOMGR -> photoManagerCheck(context)
+                ACTION_AUTOCROPCHECK -> autoCropCheck(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 3)
+                ACTION_PICKFAKE -> pickFake(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 2)
                 ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_CALCHECK -> calendarCheck(context)
                 ACTION_CROPCHECK -> cropCheck(context)
@@ -639,21 +650,27 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
     }
 
     /**
-     * 造一张图放进小组件图片目录，并打开"图片 + 每日一句"两个开关。
+     * 造若干张图放进小组件图片目录，并打开"图片 + 每日一句"两个开关。
      *
      * 为什么要在 App 里生成而不是 `adb push`：图片必须是**我们自己的包目录**下的文件，
      * 才能复现"启动器跨进程读私有文件"这条路径；生成比 push + chmod 可靠得多。
+     *
+     * @param count 造几张（默认 2）。上限提到 50 张之后，需要"很多张图"才能验
+     *              「管理图片」的缩略图网格与多选删除（发 `-e n 8`）。上限夹到 [MAX_SEED]
+     *              以免自检本身耗时太久（每张都要画条纹 + 压 JPEG）。
      */
-    private fun photoSeed(context: Context, realFile: String? = null) {
+    private fun photoSeed(context: Context, realFile: String? = null, count: Int = 2) {
         try {
             Prefs.init(context)
             val dir = java.io.File(context.filesDir, "photos").apply { mkdirs() }
-            // 造两张**颜色明显不同**的图：这样"点一下换下一张"能用像素验证
-            // （第一张纯蓝、第二张纯绿 —— 采样点里蓝绿比例互换，就说明真的换了）
-            val made = listOf(
-                Triple("seed1.jpg", 0xFF1E6FD9.toInt(), "PHOTO 1"),
-                Triple("seed2.jpg", 0xFF2E9E5B.toInt(), "PHOTO 2")
-            ).map { (fileName, bgColor, label) ->
+            val n = count.coerceIn(1, MAX_SEED)
+            // 两张一循环的**颜色明显不同**的图：这样"点一下换下一张"能用像素验证
+            // （第 1 张纯蓝、第 2 张纯绿 —— 采样点里蓝绿比例互换，就说明真的换了）
+            val colors = listOf(0xFF1E6FD9.toInt(), 0xFF2E9E5B.toInt())
+            val made = (1..n).map { k ->
+                val fileName = "seed$k.jpg"
+                val bgColor = colors[(k - 1) % colors.size]
+                val label = "PHOTO $k"
                 val f = java.io.File(dir, fileName)
                 // 640×204 ≈ 3.14:1 —— 与 4×2 组件上"按裁剪框裁好"的照片同形状。
                 //
@@ -825,6 +842,162 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         }
     }
 
+    // --------------------------------------------------------- 图片管理界面自检
+
+    /**
+     * 直接把「管理图片」界面拉起来（不经过"设置 → 滚动 → 点进去"）。
+     *
+     * 为什么需要：这个界面是代码里拼出来的（格数随张数变化），失败方式全在 View 层次上
+     * —— 缩略图解码、格子高度、选中态、删除确认，单测里一个都碰不到（Canvas/BitmapFactory
+     * 在单测里都是假实现）。这里只保证"能正常打开、格子数对"，剩下的靠 uiautomator 点。
+     */
+    private fun photoManagerCheck(context: Context) {
+        try {
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "PHOTOMGR RESULT=FAIL 没有前台 Activity（先把 App 打开再发广播）")
+                return
+            }
+            val recorded = app.timetable.widget.WidgetPhotos.recorded(context)
+            Log.i(TAG, "PHOTOMGR 打开管理界面，记录里 ${recorded.size} 张：$recorded")
+            app.timetable.ui.PhotoManagerDialog.show(
+                activity = activity,
+                onDeleted = { deleted, remaining ->
+                    Log.i(TAG, "PHOTOMGR 删掉 $deleted 张，剩 $remaining 张")
+                },
+                onClosed = {
+                    Log.i(TAG, "PHOTOMGR 界面已关闭，记录现在剩 " +
+                        "${app.timetable.widget.WidgetPhotos.recorded(context).size} 张")
+                }
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "PHOTOMGR RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    // --------------------------------------------------------- 批量自动裁剪自检
+
+    /**
+     * 跑一遍**批量自动裁剪**（`WidgetPhotos.importAutoCropped`）：把自检用的那张图反复导入 [count] 次。
+     *
+     * 为什么需要：这条路径不经过裁剪界面，用户也点不进来（它藏在"一次多选 ≥2 张"后面），
+     * 而它自己算裁剪矩形（`PhotoCrop.centerCoverFraction` → `pixelRect` → `createBitmap`），
+     * 算错一格就会崩在 `Bitmap.createBitmap`。单测只能验纯函数，这里验的是**真图上的结果**：
+     * 日志会把每张新图的尺寸与比例打出来，可以拿它和组件图片框的比例对数。
+     */
+    private fun autoCropCheck(context: Context, count: Int) {
+        try {
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "AUTOCROPCHECK RESULT=FAIL 没有前台 Activity（先把 App 打开再发广播）")
+                return
+            }
+            val src = java.io.File(context.filesDir, "realfoto.png").takeIf { it.isFile }
+                ?: java.io.File(context.filesDir, "photos/seed1.jpg")
+            if (!src.isFile) {
+                Log.i(TAG, "AUTOCROPCHECK RESULT=FAIL 找不到可用的测试图（先发 PHOTOSEED）")
+                return
+            }
+            val n = count.coerceIn(1, 20)
+            val uris = (1..n).map { android.net.Uri.fromFile(src) }
+            val plan = app.timetable.ui.PhotoCropDialog.plan(activity)
+            Log.i(
+                TAG,
+                "AUTOCROPCHECK 开始：源 ${src.name}(${src.length()}B) × $n 张，" +
+                    "图片框=${plan.frame.label} 存盘尺寸=${plan.outWidth}x${plan.outHeight}"
+            )
+            val before = app.timetable.widget.WidgetPhotos.recorded(context).size
+            // 这条路径在生产里是在后台线程跑的，自检为了日志顺序同步跑（单次调用只处理几张）
+            val saved = app.timetable.widget.WidgetPhotos.importAutoCropped(
+                context = context,
+                uris = uris,
+                frame = plan.frame,
+                outWidth = plan.outWidth,
+                outHeight = plan.outHeight
+            )
+            val after = app.timetable.widget.WidgetPhotos.recorded(context).size
+            for (path in saved) {
+                val bounds = app.timetable.widget.PhotoBitmap.boundsOf(path)
+                val ratio = if (bounds != null && bounds[1] > 0) {
+                    bounds[0].toFloat() / bounds[1].toFloat()
+                } else {
+                    -1f
+                }
+                Log.i(
+                    TAG,
+                    "AUTOCROPCHECK 产出 ${java.io.File(path).name} " +
+                        "${bounds?.get(0)}x${bounds?.get(1)} 比例=${
+                            String.format("%.3f", ratio)
+                        } 框比例=${String.format("%.3f", plan.frame.ratio)}"
+                )
+            }
+            Log.i(
+                TAG,
+                "AUTOCROPCHECK RESULT=OK 新留 ${saved.size}/$n 张，记录 $before → $after 张"
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "AUTOCROPCHECK RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    // --------------------------------------------------------- 多选导入链路自检
+
+    /**
+     * 假装「用户一次从相册选了好几张」，把结果直接喂给设置页的 `onActivityResult`。
+     *
+     * 为什么需要：一次选 ≥2 张时会弹出「逐张裁剪 / 自动裁剪」的选择框，而这条路
+     * **自动化点不进去** —— 系统相册（DocumentsUI）的多选在 Recent 视图里不可用，
+     * 换目录又要按机型和系统版本点不同入口。这里只伪造"相册返回的结果"，
+     * 后面**走的是与真实用户完全相同的代码**（同一个 requestCode、同一个 onActivityResult、
+     * 同一个选择框、同一条批量导入路径）。
+     *
+     * 图片用 App 私有目录里的文件（`file://` URI）：与 App 同 uid，读得到；
+     * 换成 `/sdcard` 下的路径反而会因为 App 没有存储权限而读不出 —— 那是 URI 的问题，
+     * 不是被验代码的问题。
+     */
+    private fun pickFake(context: Context, count: Int) {
+        try {
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "PICKFAKE RESULT=FAIL 没有前台 Activity")
+                return
+            }
+            val sources = listOf("realfoto.png", "photos/seed1.jpg", "photos/seed2.jpg")
+                .map { java.io.File(context.filesDir, it) }
+                .filter { it.isFile }
+            if (sources.isEmpty()) {
+                Log.i(TAG, "PICKFAKE RESULT=FAIL 找不到可用的测试图（先发 PHOTOSEED）")
+                return
+            }
+            val n = count.coerceIn(1, 3)
+            val chosen = (0 until n).map { sources[it % sources.size] }
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "image/*" }
+            if (n == 1) {
+                intent.data = android.net.Uri.fromFile(chosen[0])
+            } else {
+                val clip = android.content.ClipData.newRawUri(
+                    "picked", android.net.Uri.fromFile(chosen[0])
+                )
+                chosen.drop(1).forEach {
+                    clip.addItem(android.content.ClipData.Item(android.net.Uri.fromFile(it)))
+                }
+                intent.clipData = clip
+            }
+            Log.i(TAG, "PICKFAKE 伪造相册返回 $n 张：${chosen.map { it.name }}（Activity=${activity.javaClass.simpleName}）")
+            val method = android.app.Activity::class.java.getDeclaredMethod(
+                "onActivityResult",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Intent::class.java
+            )
+            method.isAccessible = true
+            method.invoke(activity, REQ_PHOTOS_FAKE, android.app.Activity.RESULT_OK, intent)
+            Log.i(TAG, "PICKFAKE RESULT=OK 已把结果交给设置页（应弹出「逐张裁剪／自动裁剪」选择框）")
+        } catch (t: Throwable) {
+            Log.i(TAG, "PICKFAKE RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
     // --------------------------------------------------------- 小组件出图自检
 
     /**
@@ -954,6 +1127,20 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_PINWIDGET = "app.timetable.debug.PINWIDGET"
         const val ACTION_CALCHECK = "app.timetable.debug.CALCHECK"
         const val ACTION_CROPCHECK = "app.timetable.debug.CROPCHECK"
+        const val ACTION_PHOTOMGR = "app.timetable.debug.PHOTOMGR"
+        const val ACTION_AUTOCROPCHECK = "app.timetable.debug.AUTOCROPCHECK"
+        const val ACTION_PICKFAKE = "app.timetable.debug.PICKFAKE"
+
+        /**
+         * 设置页里"相册返回"那个 requestCode（`SettingsActivity` 的 `REQ_PHOTOS`）。
+         *
+         * 这里是**复制**的常量而不是引用（它是 private）。这样"码对不上"这件事会立刻表现为
+         * "点了没反应"，比悄悄走到别的分支好查得多。
+         */
+        const val REQ_PHOTOS_FAKE = 0x9A01
+
+        /** 自检一次最多造几张图（多了自检本身就慢，条纹 + JPEG 每张都要几十毫秒） */
+        const val MAX_SEED = 60
         const val ACTION_WIDGETSHOT = "app.timetable.debug.WIDGETSHOT"
         const val ACTION_GREETCHECK = "app.timetable.debug.GREETCHECK"
         const val EXTRA_URL = "url"

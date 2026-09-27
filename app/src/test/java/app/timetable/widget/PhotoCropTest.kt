@@ -416,6 +416,80 @@ class PhotoCropTest {
         }
     }
 
+    // ---------------------------------------------------------------- 7. 批量导入的自动裁剪
+
+    @Test
+    fun autoCropTakesTheBiggestCentredRectangleMatchingTheFrame() {
+        // 一张 4000×3000（4:3）的照片放进 2.6:1 的框里：图比框"方"，所以宽度用满、
+        // 上下居中切一条。矩形必须**完全在图内**（这是"绝不露白"的由来）。
+        val f = PhotoCrop.centerCoverFraction(4000, 3000, 2.6f)
+        assertEquals(0f, f[0], 1e-4f)
+        assertEquals(1f, f[2], 1e-4f)
+        assertEquals("高度 = 宽 / 框比例", 4000f / 2.6f / 3000f, f[3], 1e-4f)
+        assertEquals("上下居中", (1f - f[3]) / 2f, f[1], 1e-4f)
+        assertTrue("矩形必须在图内", f[1] >= 0f && f[1] + f[3] <= 1f + 1e-4f)
+    }
+
+    @Test
+    fun autoCropTakesAFullWidthBandFromAVerticalPhoto() {
+        // 竖图（1440×3587 ≈ 0.40:1）——相册里最常见的一类。放进横条框里只能留中间一条，
+        // 这条用例钉住"切在中间"而不是"从顶上切"：顶切会把标题/人脸留在框外。
+        val f = PhotoCrop.centerCoverFraction(1440, 3587, 2.6f)
+        assertEquals(1f, f[2], 1e-4f)
+        assertEquals(1440f / 2.6f / 3587f, f[3], 1e-4f)
+        assertEquals((1f - f[3]) / 2f, f[1], 1e-4f)
+        assertTrue("比例必须等于框的比例", Math.abs((f[2] * 1440f) / (f[3] * 3587f) - 2.6f) < 0.01f)
+    }
+
+    @Test
+    fun autoCropIsTheWholePhotoWhenAspectsAlreadyMatch() {
+        // 640×204 ≈ 3.137:1（自检种的那张图）与框同比例：一分不裁，整张导入
+        val f = PhotoCrop.centerCoverFraction(640, 204, 640f / 204f)
+        assertEquals(0f, f[0], 1e-4f)
+        assertEquals(0f, f[1], 1e-4f)
+        assertEquals(1f, f[2], 1e-4f)
+        assertEquals(1f, f[3], 1e-4f)
+    }
+
+    @Test
+    fun autoCropIsSafeOnSillyInput() {
+        // 尺寸/比例读不出来时返回整张（宁可"不裁"也不许算出 NaN —— NaN 会在存盘那一步
+        // 变成 IllegalArgumentException，崩的是用户点"导入"的那一刻）
+        for (f in listOf(
+            PhotoCrop.centerCoverFraction(0, 100, 2.6f),
+            PhotoCrop.centerCoverFraction(100, 0, 2.6f),
+            PhotoCrop.centerCoverFraction(-5, -5, 2.6f),
+            PhotoCrop.centerCoverFraction(100, 100, 0f),
+            PhotoCrop.centerCoverFraction(100, 100, -1f),
+            PhotoCrop.centerCoverFraction(100, 100, Float.NaN)
+        )) {
+            assertEquals(0f, f[0], 1e-4f)
+            assertEquals(0f, f[1], 1e-4f)
+            assertEquals(1f, f[2], 1e-4f)
+            assertEquals(1f, f[3], 1e-4f)
+        }
+    }
+
+    @Test
+    fun autoCropAlwaysStaysInsideThePhotoAndOnTheFramesAspect() {
+        // 穷举一批"真实会遇到的"图与框：矩形始终在图内，且比例始终等于框的比例
+        // （这条性质是"批量导入的图与手动裁的图同形"的全部依据 —— 见 WidgetPhotos.importAutoCropped）
+        val frames = listOf(1f, 1.5f, 2f, 2.6f, 3.14f, 4f)
+        val photos = listOf(640 to 204, 4000 to 3000, 3000 to 4000, 1440 to 3587, 1080 to 1080, 200 to 4000)
+        for (r in frames) {
+            for ((w, h) in photos) {
+                val f = PhotoCrop.centerCoverFraction(w, h, r)
+                assertTrue("越界：$w x $h @ $r -> ${f.toList()}", f[0] >= -1e-4f && f[1] >= -1e-4f)
+                assertTrue("越界：$w x $h @ $r -> ${f.toList()}", f[0] + f[2] <= 1f + 1e-4f && f[1] + f[3] <= 1f + 1e-4f)
+                assertTrue("宽高必须为正：$w x $h @ $r", f[2] > 0f && f[3] > 0f)
+                val rectW = f[2] * w
+                val rectH = f[3] * h
+                val got = rectW / rectH
+                assertEquals("比例必须等于框的比例：$w x $h @ $r", r, got, r * 0.02f)
+            }
+        }
+    }
+
     @Test
     fun whatIsNotCoveredHere() {
         // 这份文件里**没有**的部分（写下来免得下次误以为覆盖了）：

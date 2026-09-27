@@ -29,6 +29,7 @@ import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
 import app.timetable.ui.CourseEditorDialog
 import app.timetable.ui.PhotoCropDialog
+import app.timetable.ui.PhotoManagerDialog
 import app.timetable.ui.StylePreviewView
 import app.timetable.ui.TimetableRenderer
 import app.timetable.ui.Ui
@@ -596,10 +597,26 @@ class SettingsActivity : BaseActivity() {
                 val count = WidgetData.photoList(this@SettingsActivity).count { java.io.File(it).exists() }
                 row(
                     "选择图片（$count/${WidgetData.MAX_PHOTOS}）",
-                    "从相册挑；会压缩到 1600px 并复制进 App，卸载即清"
+                    "从相册多选。只选 1 张可以自己裁；一次选多张会问你是逐张裁、" +
+                        "还是自动按图片区形状居中裁"
                 ) { pickPhotos() }
                 if (count > 0) {
-                    row("清除图片", "从小组件里移除全部图片") {
+                    row(
+                        "管理图片（$count 张）",
+                        "看全部图片、删掉任意一张，也可以多选一起删。" +
+                            "图片会压缩到 1600px 复制进 App，卸载即清"
+                    ) {
+                        PhotoManagerDialog.show(
+                            activity = this@SettingsActivity,
+                            onDeleted = { _, _ ->
+                                TodayWidgetProvider.refreshAll(this@SettingsActivity)
+                            },
+                            // 关掉管理界面才重建设置页：张数、以及"自动换图"开关的可用性都变了，
+                            // 但那两行在对话框后面，边删边重建只会闪
+                            onClosed = { if (!isFinishing && !isDestroyed) build() }
+                        )
+                    }
+                    row("清除图片", "一次删掉全部图片") {
                         WidgetPhotos.clear(this@SettingsActivity)
                         TodayWidgetProvider.refreshAll(this@SettingsActivity)
                         build()
@@ -787,6 +804,59 @@ class SettingsActivity : BaseActivity() {
             .onFailure { toast("这台设备没有可用的相册选择器") }
     }
 
+    /** 逐张裁剪（老路径，一字未改）——一次选 1 张时直接走这里，多张时由用户选 */
+    private fun cropOneByOne(uris: List<android.net.Uri>) {
+        PhotoCropDialog.start(this, uris) { saved ->
+            toast(if (saved.isEmpty()) "没有导入图片" else "已导入 ${saved.size} 张图片")
+            TodayWidgetProvider.refreshAll(this)
+            build()
+        }
+    }
+
+    /**
+     * 批量导入：**不问用户**，全部按图片区的形状居中裁（[WidgetPhotos.importAutoCropped]）。
+     *
+     * 为什么必须给这条路：上限 50 张之后，"逐张确认"要用户点 50 次 —— 等于没有这个功能。
+     * 自动裁剪用的是与裁剪界面**同一份几何算术**（[app.timetable.widget.PhotoCrop.centerCoverFraction]），
+     * 结果与"用户把照片放到最大并居中确认"逐像素同构，只是少了微调的机会。
+     *
+     * 必须在后台线程做（50 张解码 + 压缩要几秒），所以这里挂一个不可取消的进度框：
+     * 没有进度的话，用户会以为卡死然后杀掉 App —— 而那正好会留下半批文件。
+     */
+    private fun importAutoCropped(uris: List<android.net.Uri>) {
+        val progress = AlertDialog.Builder(this)
+            .setTitle("正在导入图片")
+            .setMessage("正在处理 0/${uris.size} 张…")
+            .setCancelable(false)
+            .create()
+        runCatching { progress.show() }
+            .onFailure { toast("导入中…") }
+
+        val plan = PhotoCropDialog.plan(this)
+        Thread {
+            val saved = runCatching {
+                WidgetPhotos.importAutoCropped(
+                    context = this,
+                    uris = uris,
+                    frame = plan.frame,
+                    outWidth = plan.outWidth,
+                    outHeight = plan.outHeight
+                ) { done, total ->
+                    runOnUiThread { runCatching { progress.setMessage("正在处理 $done/$total 张…") } }
+                }
+            }.getOrElse {
+                toast("导入失败：${it.message}")
+                emptyList()
+            }
+            runOnUiThread {
+                runCatching { progress.dismiss() }
+                toast(if (saved.isEmpty()) "没有导入图片" else "已导入 ${saved.size} 张图片")
+                TodayWidgetProvider.refreshAll(this)
+                build()
+            }
+        }.apply { name = "photo-import"; isDaemon = true }.start()
+    }
+
 
     /** 三列一行的可选项 */
     private fun chipGrid(names: List<String>, selected: Int, onPick: (Int) -> Unit): LinearLayout =
@@ -956,11 +1026,23 @@ class SettingsActivity : BaseActivity() {
             // 不再"选完直接存"：先让用户自己裁 —— 裁剪框的形状就是小组件里图片区**真实的形状**
             // （按组件几乘几算出来的），所以他框住的那一块，就是组件里会显示的那一块。
             // 空间够时整张完整显示，不够时取这块的中间部分（都由渲染端自动决定，没有倍率可调）。
-            PhotoCropDialog.start(this, uris) { saved ->
-                toast(if (saved.isEmpty()) "没有导入图片" else "已导入 ${saved.size} 张图片")
-                TodayWidgetProvider.refreshAll(this)
-                build()
+            //
+            // 但如果一次挑了多张，逐张裁就等于让用户点 N 次（上限提到 50 张之后这是不可用的），
+            // 所以先问一句：逐张裁（要精调时）还是自动裁（一次到底）。两条路用的是**同一个框**
+            // （PhotoCropDialog.plan），所以产出的图比例一致，点一下换下一张不会变形。
+            if (uris.size == 1) {
+                cropOneByOne(uris)
+                return
             }
+            AlertDialog.Builder(this)
+                .setTitle("导入 ${uris.size} 张图片")
+                .setMessage(
+                    "逐张裁剪：每张都能自己调位置和大小（要一张张确认）。\n" +
+                        "自动裁剪：全部按图片区的形状居中裁，一次处理完，之后还能在「管理图片」里删。"
+                )
+                .setPositiveButton("自动裁剪（快）") { _, _ -> importAutoCropped(uris) }
+                .setNegativeButton("逐张裁剪") { _, _ -> cropOneByOne(uris) }
+                .show()
             return
         }
 
