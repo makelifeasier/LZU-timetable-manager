@@ -64,6 +64,8 @@ internal class AssistantDialog private constructor(
     private val host: Activity,
     /** 生产实现；测试注入假模型（见 `AssistantModel` 的注释） */
     private val model: AssistantModel,
+    /** 打开时预填到输入框（只有自检/截图会传，正常入口是空串） */
+    private val initialText: String = "",
     /** 任何"数据被改过"或"对话结束"之后回调一次，调用方据此刷新课表/设置页 */
     private val onDone: () -> Unit = {}
 ) : Dialog(host) {
@@ -222,6 +224,8 @@ internal class AssistantDialog private constructor(
             setPadding(dp(12), dp(10), dp(12), dp(10))
             maxLines = 3
             setHorizontallyScrolling(false)
+            // 自检/截图会预填一句话；正常入口这里拿到的是空串，输入框仍然是空的
+            if (initialText.isNotEmpty()) setText(initialText)
         }
         sendButton = primaryPill("发送") { send() }
         undoButton = pill("撤销上次 AI 改动") { confirmUndo() }
@@ -636,9 +640,18 @@ internal class AssistantDialog private constructor(
         fun show(
             activity: Activity,
             model: AssistantModel = ConfiguredAssistantModel(activity),
+            /**
+             * 打开时预填到输入框里的话。
+             *
+             * 只给自检/截图用：`adb shell input text` 打不出中文，而"截图里要出现一句真实的中文提问"
+             * 这件事只有预填能做到。正常入口一律走默认空串。
+             * 位置刻意放在 [onDone] **之前**：这样 `show(this) { render() }` 这种尾随 lambda 的
+             * 老写法不受影响（尾随 lambda 只能绑到最后一个函数参数上）。
+             */
+            initialText: String = "",
             onDone: () -> Unit = {}
         ) {
-            runCatching { AssistantDialog(activity, model, onDone).show() }
+            runCatching { AssistantDialog(activity, model, initialText, onDone).show() }
                 .onFailure { Log.w(TAG, "打不开 AI 助手：${it.javaClass.simpleName}: ${it.message}") }
         }
     }

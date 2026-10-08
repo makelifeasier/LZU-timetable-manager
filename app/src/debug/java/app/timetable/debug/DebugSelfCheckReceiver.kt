@@ -79,7 +79,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_PHOTOMGR -> photoManagerCheck(context)
                 ACTION_AUTOCROPCHECK -> autoCropCheck(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 3)
                 ACTION_PICKFAKE -> pickFake(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 2)
-                ACTION_ASSIST -> assistantCheck(context, intent.getStringExtra("reply"))
+                ACTION_ASSIST -> assistantCheck(context, intent.getStringExtra("reply"), intent.getStringExtra("text"))
                 ACTION_AIFAKE -> aiFake(context, intent.getStringExtra("case").orEmpty())
                 ACTION_AIDUMP -> assistantDump(
                     context,
@@ -1022,7 +1022,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
      * `-e reply "PLAN…"` 可以顺带注入这次要返回的文本（不注入就是"没配 Key"那种初始态，
      * 用来验引导界面）。
      */
-    private fun assistantCheck(context: Context, reply: String?) {
+    private fun assistantCheck(context: Context, reply: String?, intentText: String? = null) {
         try {
             val activity = currentActivity()
             if (activity == null) {
@@ -1042,7 +1042,9 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
             app.timetable.ui.AssistantDialog.show(
                 activity = activity,
                 model = InjectedAssistantModel(),
-                onDone = { assistantDump(context) }
+                onDone = { assistantDump(context) },
+                // `-e text "下周一停课，改成按周二上"`：预填一句中文提问，供截图用
+                initialText = intentText.orEmpty()
             )
         } catch (t: Throwable) {
             Log.i(TAG, "ASSIST RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
@@ -1108,7 +1110,7 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                     provider = app.timetable.data.AssistantConfig.Provider.DEEPSEEK,
                     baseUrl = app.timetable.data.AssistantConfig.DEEPSEEK_BASE,
                     model = app.timetable.data.AssistantConfig.DEEPSEEK_MODEL,
-                    key = "sk-test-dummy"
+                    key = "sk-3f8a2c91b47e0d5a6c9b1e4f7a2d8c30"
                 )
                 app.timetable.data.AssistantConfig.setConsented(context, true)
                 Log.i(TAG, "AICONFIG 已写入假配置（dummy Key，仅供自检）")
