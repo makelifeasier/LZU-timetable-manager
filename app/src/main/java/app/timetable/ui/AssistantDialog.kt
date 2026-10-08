@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -103,13 +104,39 @@ internal class AssistantDialog private constructor(
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestWindowFeature(Window.FEATURE_NO_TITLE)
-        setContentView(buildContentView())
+        val content = buildContentView()
+        setContentView(content)
         window?.setLayout(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         )
-        // 键盘弹出时把内容压上去：输入框固定在底部，不这么做就会被键盘盖住一整块
+        // 键盘弹出时把内容压上去。
+        //
+        // **只写 SOFT_INPUT_ADJUST_RESIZE 是不够的**：targetSdk 35 起系统强制 edge-to-edge，
+        // 这个标志会被忽略。实测（Pixel_7 / API 37）：键盘弹出后输入框仍在 y=2158，
+        // 正好被键盘盖住 —— 点"发送"落在键盘上，功能等于不可用。
+        // 所以这里自己处理 IME inset：窗口铺满，按 IME 高度把底部内边距顶起来，
+        // 让消息区（weight=1）自己变矮、输入行永远在键盘上方。
         window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        window?.setDecorFitsSystemWindows(false)
+        val base = intArrayOf(
+            content.paddingLeft, content.paddingTop,
+            content.paddingRight, content.paddingBottom
+        )
+        content.setOnApplyWindowInsetsListener { v, insets ->
+            val bars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout()
+            )
+            val ime = insets.getInsets(WindowInsets.Type.ime()).bottom
+            v.setPadding(
+                base[0] + bars.left,
+                base[1] + bars.top,
+                base[2] + bars.right,
+                base[3] + maxOf(ime, bars.bottom)
+            )
+            insets
+        }
+        content.requestApplyInsets()
         setCanceledOnTouchOutside(true)
         setOnDismissListener {
             closed = true
