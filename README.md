@@ -22,7 +22,7 @@ App 自己把**你自己的**课表链接找出来并记住。
 - 568 个单元测试 · MIT License
 
 > **iOS 版**在 [`ios/`](ios/README.md)：SwiftUI + WidgetKit 的同源移植，解析器/周次/链接发现逐条对应。
-> ⚠️ 那份代码**从未编译过**（开发机是 Windows，没有 macOS），需要你在 Mac 上跑一次它的单测来完成验证；
+> ⚠️ 那份代码**没在本机编译过**（开发机是 Windows，没有 macOS），所以交给 CI 的 macOS 运行器编、跑它的单测；
 > 且 iOS 的小组件**不能上下滑动**（系统限制），细节见 `ios/README.md`。
 
 ---

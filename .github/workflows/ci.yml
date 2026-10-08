@@ -1,14 +1,11 @@
-# 持续集成：**不用买 Mac 也能编译并测试 iOS 代码**
+# 持续集成：每次 push 都在 GitHub 的机器上跑一遍两端。
+#   · android 任务：ubuntu 上跑 Android 的单元测试
+#   · ios 任务：macOS 上生成 Xcode 工程并跑 XCTest
 #
-# GitHub 给公开仓库免费提供 macOS 运行器（Apple 官方机器 + Xcode）。
-# 每次 push 都会：
-#   · android 任务：在 ubuntu 上跑 Android 的单元测试
-#   · ios 任务：在 macOS 上生成 Xcode 工程并跑 XCTest
+# iOS 那份代码在本机编不了（开发机是 Windows，没有 Xcode），只能放到这边编 ——
+# 公开仓库用 macOS 运行器不花钱。
 #
-# 也就是说：iOS 那份「我从未编译过」的代码，靠这个工作流就能得到验证 ——
-# 如果 ios 任务报编译错误，把日志发我，我按报错修。
-#
-# 私有仓库也能用（有免费额度），但公开仓库完全免费。
+# 私有仓库也能用（有免费额度），公开仓库完全免费。
 
 name: CI
 
@@ -51,16 +48,15 @@ jobs:
           if-no-files-found: ignore
 
   ios:
-    name: iOS 编译与单测（macOS 运行器）
+    name: iOS 编译与单测
     runs-on: macos-14
-    # 这份 iOS 代码从未编译过，第一次跑**大概率是红的** —— 那正是我们要的信息（把日志发来逐个修）。
-    # 用 continue-on-error 让它单独红：不连累 android 任务，也不让仓库首页挂一个大红叉 ——
-    # 这里失败是"待办"，不是"项目坏了"。
+    # 没在本机编译过，第一次跑大概率是红的：用 continue-on-error 让它单独红，
+    # 不连累 android 任务，也不让仓库首页挂一个大红叉 —— 这里是待办，不是项目坏了。
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - name: 看看这台机器的 Xcode 与模拟器
+      - name: 打印 Xcode 与可用模拟器
         run: |
           xcodebuild -version
           xcrun simctl list devices available | head -30
@@ -92,9 +88,8 @@ jobs:
           path: ios/build/TestResults.xcresult
           if-no-files-found: ignore
 
-      # 编不过也无所谓，但编过了就顺手产出一个**未签名**的构建：
-      # 等你有了 Apple 开发者账号（TestFlight / Ad Hoc），可以直接拿去签名分发。
-      # 分发方式对比见 ios/DISTRIBUTION.md。
+      # 编过了就顺手产出一个**未签名**构建：以后有了 Apple 开发者账号
+      # （TestFlight / Ad Hoc）可以直接拿去签名分发。分发方式对比见 ios/DISTRIBUTION.md。
       - name: 产出未签名构建（Release / 真机）
         if: success()
         working-directory: ios
