@@ -256,8 +256,8 @@ internal class AssistantDialog private constructor(
      * 一律 `post { fullScroll(FOCUS_DOWN) }` 而不是直接滚：刚 addView 的视图还没测量，
      * 此时滚动位置是按旧高度算的，会停在"差一行"的地方 —— 用户看到的是自己那句话被切掉一半。
      */
-    private fun addBubble(text: String, mine: Boolean) {
-        if (text.isBlank()) return
+    private fun addBubble(text: String, mine: Boolean): View? {
+        if (text.isBlank()) return null
         val bubble = TextView(host).apply {
             this.text = text
             textSize = 13f
@@ -276,6 +276,7 @@ internal class AssistantDialog private constructor(
             }
         )
         scroller.post { scroller.fullScroll(View.FOCUS_DOWN) }
+        return bubble
     }
 
     /** 一条小字说明（原文片段、detail 这类"要能读到但不该抢主角"的内容） */
@@ -289,15 +290,17 @@ internal class AssistantDialog private constructor(
     }
 
     /** 在消息流最后挂一个次要按钮（「再试一次」「去改 Key」这种只在这一轮有意义的动作） */
-    private fun addInlineButton(text: String, onClick: () -> Unit) {
+    private fun addInlineButton(text: String, onClick: () -> Unit): View {
+        val button = pill(text, onClick)
         messages.addView(
-            pill(text, onClick),
+            button,
             LinearLayout.LayoutParams(WRAP, WRAP).apply {
                 gravity = Gravity.START
                 topMargin = dp(4)
             }
         )
         scroller.post { scroller.fullScroll(View.FOCUS_DOWN) }
+        return button
     }
 
     private fun setStatus(text: String) {
@@ -313,11 +316,16 @@ internal class AssistantDialog private constructor(
      */
     private fun showNotConfigured() {
         bottom.visibility = View.GONE
-        addBubble("先在设置里填一个你自己的 API Key —— 我没法替你带一个。", false)
-        addInlineButton("去填 API Key") {
+        val guide = ArrayList<View>(2)
+        addBubble("先在设置里填一个你自己的 API Key —— 我没法替你带一个。", false)?.let { guide += it }
+        guide += addInlineButton("去填 API Key") {
             AssistantConfigDialog.show(host) {
                 // 填完回来重新判断：Key 可能刚填上，也可能用户什么都没改就关了
                 if (!closed) {
+                    // 把上面那两行"还没配 Key"的引导**撤掉**：留着的话界面会同时说
+                    // "还没填 Key"和"可以开始说话了"，用户不知道该信哪一句。
+                    // （实测就是这么冒出来的：配完 Key 回来，旧气泡与输入框并排躺着。）
+                    guide.forEach { runCatching { messages.removeView(it) } }
                     bottom.visibility = View.VISIBLE
                     paintSend()
                     refreshUndoButton()

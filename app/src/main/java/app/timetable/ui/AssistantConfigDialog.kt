@@ -310,19 +310,27 @@ internal class AssistantConfigDialog private constructor(
         val model = modelField.text.toString().trim()
         val typedKey = keyField.text.toString().trim()
 
+        // 每个拒绝分支都留一行日志：这些提示是 Toast，用户看一眼就没了，
+        // 而"点了保存没反应"到底是哪一条拦住的，事后只能靠日志回答
+        Log.i(TAG, "保存被按下：同意=$agreed 已存Key=${AssistantConfig.hasKey(host)} 新填Key=${typedKey.isNotEmpty()}")
+
         if (!agreed && !AssistantConfig.consented(host)) {
+            Log.i(TAG, "保存被拒：还没同意隐私说明")
             toast("请先阅读并同意")
             return
         }
         AssistantConfig.validateBaseUrl(base)?.let {
+            Log.i(TAG, "保存被拒：地址不合法（$it）")
             toast(it)
             return
         }
         if (model.isEmpty()) {
+            Log.i(TAG, "保存被拒：模型名为空")
             toast("请填模型名")
             return
         }
         if (typedKey.isEmpty() && !AssistantConfig.hasKey(host)) {
+            Log.i(TAG, "保存被拒：既没填新 Key、也没有已存的 Key")
             toast("请先填 API Key")
             return
         }
