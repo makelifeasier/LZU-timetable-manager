@@ -59,6 +59,31 @@
             android:textSize="13sp"
             android:textStyle="bold" />
 
+        <!--
+          助手入口。
+
+          为什么是一只**同尺寸的药丸**而不是悬浮球：课表页是整块密集信息，
+          悬浮球会压住格子；而顶栏本来就是「标题 + 同步 + ⋮」这一排操作，
+          多一个同族按钮不改变视觉层级。用 bg_pill（淡底）而不是 bg_accent_chip：
+          「同步」是这一屏的主操作，两个实心强调色会互相抢。
+        -->
+        <TextView
+            android:id="@+id/assistantBtn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="2dp"
+            android:background="@drawable/bg_pill"
+            android:clickable="true"
+            android:focusable="true"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:text="@string/assistant_button"
+            android:textColor="@color/accent"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
         <FrameLayout
             android:id="@+id/menuBtn"
             android:layout_width="@dimen/touch_target"

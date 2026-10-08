@@ -17,6 +17,7 @@ import app.timetable.data.WeekCalc
 import app.timetable.databinding.ActivityMainBinding
 import app.timetable.greet.HolidayGreeter
 import app.timetable.share.ImageExporter
+import app.timetable.ui.AssistantDialog
 import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
 import app.timetable.ui.DayEditDialog
@@ -56,6 +57,7 @@ class MainActivity : BaseActivity() {
         binding.nextWeek.setOnClickListener { shiftWeek(1) }
         binding.thisWeek.setOnClickListener { jumpToCurrentWeek() }
         binding.syncBtn.setOnClickListener { syncNow() }
+        binding.assistantBtn.setOnClickListener { openAssistant() }
         binding.menuBtn.setOnClickListener { showMenu(it) }
         binding.bannerButton.setOnClickListener {
             startActivity(Intent(this, LoginActivity::class.java))
@@ -129,6 +131,7 @@ class MainActivity : BaseActivity() {
         popup.menu.add(0, MENU_SETTINGS, 4, R.string.action_settings)
         popup.menu.add(0, MENU_DIAG, 5, R.string.action_diagnostics)
         popup.menu.add(0, MENU_HELP, 6, R.string.action_help)
+        popup.menu.add(0, MENU_ASSISTANT, 7, R.string.action_assistant)
         popup.setOnMenuItemClickListener { onMenuAction(it.itemId) }
         popup.show()
     }
@@ -162,7 +165,16 @@ class MainActivity : BaseActivity() {
             showGuide(); true
         }
 
+        MENU_ASSISTANT -> {
+            // 顶栏「助手」按钮与这条菜单走同一个入口：一处实现，两个发现路径
+            openAssistant(); true
+        }
+
         else -> false
+    }
+
+    private fun openAssistant() {
+        AssistantDialog.show(this) { render() }
     }
 
     private fun syncNow() {
@@ -471,5 +483,6 @@ class MainActivity : BaseActivity() {
         private const val MENU_SETTINGS = 5
         private const val MENU_DIAG = 6
         private const val MENU_HELP = 7
+    private const val MENU_ASSISTANT = 8
     }
 }

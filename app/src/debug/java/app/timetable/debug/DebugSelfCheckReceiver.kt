@@ -79,6 +79,18 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
                 ACTION_PHOTOMGR -> photoManagerCheck(context)
                 ACTION_AUTOCROPCHECK -> autoCropCheck(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 3)
                 ACTION_PICKFAKE -> pickFake(context, intent.getStringExtra("n")?.trim()?.toIntOrNull() ?: 2)
+                ACTION_ASSIST -> assistantCheck(context, intent.getStringExtra("reply"))
+                ACTION_AIFAKE -> aiFake(context, intent.getStringExtra("case").orEmpty())
+                ACTION_AIDUMP -> assistantDump(
+                    context,
+                    intent.getStringExtra("date")?.trim()?.let {
+                        runCatching { java.time.LocalDate.parse(it) }.getOrNull()
+                    }
+                )
+                ACTION_AICONFIG -> assistantConfig(
+                    context,
+                    clear = intent.getStringExtra("clear")?.trim() == "1"
+                )
                 ACTION_PINWIDGET -> pinWidget(context)
                 ACTION_CALCHECK -> calendarCheck(context)
                 ACTION_CROPCHECK -> cropCheck(context)
@@ -998,6 +1010,172 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         }
     }
 
+    // --------------------------------------------------------- AI 助手自检
+
+    /**
+     * 打开「AI 助手」对话框，用**假模型**（[InjectedAssistantModel]）替换真模型。
+     *
+     * 为什么必须能替换：真 Key 只有用户有，而"解析 → 解释 → 预览 → 应用 → 撤销"整条链路
+     * 都要在设备上验。假模型走的是**同一个接口**，所以除"谁来生成那段文本"之外，
+     * 后面全是生产代码。
+     *
+     * `-e reply "PLAN…"` 可以顺带注入这次要返回的文本（不注入就是"没配 Key"那种初始态，
+     * 用来验引导界面）。
+     */
+    private fun assistantCheck(context: Context, reply: String?) {
+        try {
+            val activity = currentActivity()
+            if (activity == null) {
+                Log.i(TAG, "ASSIST RESULT=FAIL 没有前台 Activity（先把 App 打开再发广播）")
+                return
+            }
+            if (!reply.isNullOrBlank()) {
+                FakeAssistantModel.reply = reply
+                Log.i(TAG, "ASSIST 已注入回复 ${reply.length} 字：${reply.take(120)}")
+            }
+            Log.i(
+                TAG,
+                "ASSIST 打开助手对话框（假模型）· 已配 Key=${app.timetable.data.AssistantConfig.hasKey(context)}" +
+                    " 已同意=${app.timetable.data.AssistantConfig.consented(context)}" +
+                    " 可撤销=${app.timetable.ai.AssistantUndo.available(context)}"
+            )
+            app.timetable.ui.AssistantDialog.show(
+                activity = activity,
+                model = InjectedAssistantModel(),
+                onDone = { assistantDump(context) }
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "ASSIST RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    /**
+     * 用回环假服务把 `ai/AssistantClient` 的**真实 socket 链路**跑一遍。
+     *
+     * 场景：`ok` / `401` / `402` / `429` / `500` / `timeout`。
+     * 断言落在日志里：请求头有没有 `Authorization`、请求体里有没有 `model` / `temperature` /
+     * `thinking`（DeepSeek 专有字段）、有没有把 Key 写进**请求体**（必须没有）、
+     * 以及各错误码被翻译成什么话。
+     */
+    private fun aiFake(context: Context, caseName: String) {
+        // 两条额外模式：raw=裸 socket 回环自测（定位"卡在哪一步"）、host=打宿主机上的假服务
+        when (caseName.trim().lowercase()) {
+            "raw" -> {
+                Log.i(TAG, "AIFAKE 裸 socket 回环自测开始")
+                FakeHttp.rawSocketCheck { line -> Log.i(TAG, "AIFAKE-RAW 结论：$line") }
+                return
+            }
+
+            "host", "10.0.2.2" -> {
+                Log.i(TAG, "AIFAKE 打宿主机假服务（10.0.2.2:8877）")
+                FakeHttp.callHost(8877) { line -> Log.i(TAG, "AIFAKE-HOST 结论：$line") }
+                return
+            }
+        }
+        val agent = when (caseName.trim().lowercase()) {
+            "401", "badkey" -> FakeHttp.Case.BAD_KEY
+            "402", "nobalance" -> FakeHttp.Case.NO_BALANCE
+            "429", "ratelimit" -> FakeHttp.Case.RATE_LIMIT
+            "500", "server" -> FakeHttp.Case.SERVER_ERROR
+            "timeout" -> FakeHttp.Case.TIMEOUT
+            else -> FakeHttp.Case.OK
+        }
+        Log.i(TAG, "AIFAKE 开始，场景=${if (caseName.isBlank()) "ok" else caseName}")
+        FakeHttp.run(
+            agent = agent,
+            readTimeoutMs = if (agent == FakeHttp.Case.TIMEOUT) 1_000 else 60_000
+        ) { line ->
+            Log.i(TAG, "AIFAKE 完成：$line")
+        }
+    }
+
+    /**
+     * 写一份**假配置**（dummy Key + 已同意），或者清掉它。
+     *
+     * 为什么需要：真 Key 只有用户有，而"对话框在有配置时会走哪条路、没配置时会不会发请求"
+     * 这两件事必须在设备上各验一次。这里写的 `sk-test-dummy` 是**假 Key**，
+     * 配合 `ASSIST` 的假模型时根本不会出网；即使出网也只会被服务商拒绝 —— 不碰任何真实额度。
+     */
+    private fun assistantConfig(context: Context, clear: Boolean) {
+        try {
+            if (clear) {
+                app.timetable.data.AssistantConfig.clearKey(context)
+                app.timetable.data.AssistantConfig.setConsented(context, false)
+                Log.i(TAG, "AICONFIG 已清空 Key 与同意状态")
+            } else {
+                app.timetable.data.AssistantConfig.save(
+                    context = context,
+                    provider = app.timetable.data.AssistantConfig.Provider.DEEPSEEK,
+                    baseUrl = app.timetable.data.AssistantConfig.DEEPSEEK_BASE,
+                    model = app.timetable.data.AssistantConfig.DEEPSEEK_MODEL,
+                    key = "sk-test-dummy"
+                )
+                app.timetable.data.AssistantConfig.setConsented(context, true)
+                Log.i(TAG, "AICONFIG 已写入假配置（dummy Key，仅供自检）")
+            }
+            Log.i(
+                TAG,
+                "AICONFIG 现在：ready=${app.timetable.data.AssistantConfig.ready(context)} " +
+                    "掩码=${app.timetable.data.AssistantConfig.maskedKey(context).ifEmpty { "(空)" }} " +
+                    "端点=${app.timetable.data.AssistantConfig.endpoint(context)}"
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "AICONFIG RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
+    /** 把助手相关的状态打出来（撤销、当日覆盖、自定义课程、今天生效的课表） */
+    private fun assistantDump(context: Context, intentDate: java.time.LocalDate? = null) {        try {
+            Prefs.init(context)
+            TimetableRepository.init(context)
+            val today = java.time.LocalDate.now()
+            val overrides = app.timetable.data.DayOverrides.all(context)
+            val courses = app.timetable.data.UserCourses.all(context)
+            Log.i(
+                TAG,
+                "AIDUMP 撤销可用=${app.timetable.ai.AssistantUndo.available(context)} " +
+                    "（${app.timetable.ai.AssistantUndo.describe(context) ?: "-"}）"
+            )
+            Log.i(TAG, "AIDUMP 当日覆盖 ${overrides.size} 条：" + overrides.entries.joinToString(" | ") { (d, o) ->
+                "$d=${o.mode}" + (if (o.mode == app.timetable.data.DayOverrides.Mode.REPLACE) "(第${o.sourceWeek}周 星期${if (o.sourceDay == 0) "同" else o.sourceDay})" else "") +
+                    (if (o.extra.isNotEmpty()) "[${o.extra.joinToString(",") { it.name + ":" + it.startSection + "-" + it.endSection }}]" else "")
+            })
+            Log.i(TAG, "AIDUMP 自定义课程 ${courses.size} 门：" + courses.joinToString(" | ") { it.session.name + "@" + it.session.day + ":" + it.session.startSection + "-" + it.session.endSection })
+            Log.i(
+                TAG,
+                "AIDUMP 今天（$today）生效：" + TimetableRepository.sessionsOn(context, today)
+                    .joinToString(" | ") { it.name + ":" + it.startSection + "-" + it.endSection }
+            )
+            // 全量课表：自检要挑一个"本来有课"的日期来做替换，否则改动看不出来
+            Log.i(
+                TAG,
+                "AIDUMP 全部课程：${TimetableRepository.result().sessions.joinToString(" | ") {
+                    it.name + " 星期" + it.day + " 行" + it.startSection + "-" + it.endSection +
+                        " 周" + it.weeks.start + "-" + it.weeks.end
+                }}"
+            )
+            // 指定日期的生效结果：`.AIDUMP -e date 2026-10-15` —— 这是课表页/组件/导出/提醒共用的唯一入口
+            intentDate?.let { d ->
+                Log.i(
+                    TAG,
+                    "AIDUMP $d 生效：" + TimetableRepository.sessionsOn(context, d)
+                        .joinToString(" | ") { it.name + ":" + it.startSection + "-" + it.endSection }
+                )
+            }
+            Log.i(
+                TAG,
+                "AIDUMP 配置：服务商=${app.timetable.data.AssistantConfig.provider(context)} " +
+                    "地址=${app.timetable.data.AssistantConfig.baseUrl(context)} " +
+                    "模型=${app.timetable.data.AssistantConfig.model(context)} " +
+                    "有Key=${app.timetable.data.AssistantConfig.hasKey(context)} " +
+                    "掩码=${app.timetable.data.AssistantConfig.maskedKey(context).ifEmpty { "(空)" }} " +
+                    "已同意=${app.timetable.data.AssistantConfig.consented(context)}"
+            )
+        } catch (t: Throwable) {
+            Log.i(TAG, "AIDUMP RESULT=FAIL ${t.javaClass.name}: ${t.message}", t)
+        }
+    }
+
     // --------------------------------------------------------- 小组件出图自检
 
     /**
@@ -1130,6 +1308,18 @@ class DebugSelfCheckReceiver : BroadcastReceiver() {
         const val ACTION_PHOTOMGR = "app.timetable.debug.PHOTOMGR"
         const val ACTION_AUTOCROPCHECK = "app.timetable.debug.AUTOCROPCHECK"
         const val ACTION_PICKFAKE = "app.timetable.debug.PICKFAKE"
+
+        /** 打开 AI 助手（假模型）；可带 `-e reply "PLAN…"` 注入这次要返回的文本 */
+        const val ACTION_ASSIST = "app.timetable.debug.ASSIST"
+
+        /** 用回环假服务真跑一遍 AI 的 HTTP 链路；`-e case ok|401|402|429|500|timeout` */
+        const val ACTION_AIFAKE = "app.timetable.debug.AIFAKE"
+
+        /** 打印助手相关状态（撤销、覆盖、自定义课程、配置摘要） */
+        const val ACTION_AIDUMP = "app.timetable.debug.AIDUMP"
+
+        /** 写/清**假**配置（dummy Key），供自检验"有配置/没配置"两条路；`-e clear 1` 清空 */
+        const val ACTION_AICONFIG = "app.timetable.debug.AICONFIG"
 
         /**
          * 设置页里"相册返回"那个 requestCode（`SettingsActivity` 的 `REQ_PHOTOS`）。

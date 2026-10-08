@@ -10,6 +10,10 @@
     <string name="action_diagnostics">诊断</string>
     <string name="action_help">使用帮助</string>
 
+    <!-- 顶栏按钮文字要短：411dp 的屏上顶栏一共就三个控件，长了会把标题挤成省略号 -->
+    <string name="assistant_button">助手</string>
+    <string name="action_assistant">AI 改课表</string>
+
     <string name="login_title">登录并导入课表</string>
     <string name="login_hint">请在下方完成统一身份认证登录（兰州大学APP扫码 或 账号密码+验证码 均可），登录成功后会自动导入课表。\n若提示「文件未找到」不用担心，会自动改走认证入口。</string>
     <string name="login_success">导入成功</string>

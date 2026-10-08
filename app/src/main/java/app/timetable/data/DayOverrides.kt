@@ -226,6 +226,31 @@ internal object DayOverrides {
         Prefs.dayOverrides = write(map)
     }
 
+    /**
+     * 一次写入多天的改动（**原子**）：`null` 表示删掉那天的覆盖（= 恢复原课表）。
+     *
+     * 为什么需要它：AI 助手一次会改好几天，`put` 一天写一次的话，中途出错就会留下
+     * "改了一半"的课表。这里先算完整张表、最后写一次，写完就等于全写完。
+     *
+     * @return 真正发生变化的条数（没变化就不写盘）
+     */
+    fun putAll(context: Context, changes: Map<LocalDate, Override?>): Int {
+        Prefs.init(context)
+        if (changes.isEmpty()) return 0
+        val map = LinkedHashMap(all(context))
+        var changed = 0
+        for ((date, o) in changes) {
+            if (o == null) {
+                if (map.remove(date) != null) changed++
+            } else if (map[date] != o) {
+                map[date] = o
+                changed++
+            }
+        }
+        if (changed > 0) Prefs.dayOverrides = write(map)
+        return changed
+    }
+
     /** 启动/导入时调用：清掉过期的覆盖 */
     fun prune(context: Context, today: LocalDate = LocalDate.now()) {
         Prefs.init(context)

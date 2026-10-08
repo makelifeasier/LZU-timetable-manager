@@ -267,6 +267,20 @@ internal object UserCourses {
     /** 仓库读的入口：只要 [Session]，id 不进课表 */
     fun sessions(context: Context): List<Session> = all(context).map { it.session }
 
+    /**
+     * 原样读出存储串（**给"字节级撤销"用**，见 `ai/AssistantUndo`）。
+     *
+     * 单独开这两个函数而不是让撤销逻辑自己去摸 prefs 文件名：存储的文件名/键名属于本文件的
+     * 实现细节，散到外面就会在将来某次改名时漏掉一处 —— 那种错只在"撤销之后数据不对"时才发现。
+     */
+    internal fun raw(context: Context): String =
+        prefs(context).getString(KEY, "").orEmpty()
+
+    /** 原样写回存储串（撤销时用）。不做校验：写回去的东西本来就是从这里读出来的 */
+    internal fun replaceRaw(context: Context, raw: String) {
+        prefs(context).edit().putString(KEY, raw).apply()
+    }
+
     /** 保存（新增或覆盖），返回保存后的整份列表 */
     fun save(context: Context, course: Course): List<Course> {
         val next = upsert(all(context), course)

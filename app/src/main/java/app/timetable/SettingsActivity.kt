@@ -15,6 +15,8 @@ import android.widget.RadioGroup
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import app.timetable.ai.AssistantUndo
+import app.timetable.data.AssistantConfig
 import app.timetable.data.Prefs
 import app.timetable.data.Session
 import app.timetable.data.TimetableRepository
@@ -25,6 +27,7 @@ import app.timetable.donate.Donations
 import app.timetable.greet.Holidays
 import app.timetable.greet.LunarCalendar
 import app.timetable.notify.Notifications
+import app.timetable.ui.AssistantConfigDialog
 import app.timetable.ui.Backgrounds
 import app.timetable.ui.BaseActivity
 import app.timetable.ui.CourseEditorDialog
@@ -1066,6 +1069,32 @@ class SettingsActivity : BaseActivity() {
     private fun buildMisc() {
         sectionTitle("其他")
         card {
+            // ---- AI 助手（默认关闭：没填 Key 就一个请求都不发）----
+            row(
+                "AI 助手",
+                if (AssistantConfig.hasKey(this@SettingsActivity)) {
+                    "已填 Key（${AssistantConfig.maskedKey(this@SettingsActivity)}）· " +
+                        "用自然语言改课表，改之前先给你看结果"
+                } else {
+                    "还没填 API Key。填一个你自己的（默认 DeepSeek）它才能帮你改课表"
+                }
+            ) {
+                AssistantConfigDialog.show(this@SettingsActivity) { build() }
+            }
+            AssistantUndo.describe(this@SettingsActivity)?.let { line ->
+                row("撤销上次 AI 改动", line) {
+                    AlertDialog.Builder(this@SettingsActivity)
+                        .setTitle("撤销上次 AI 改动")
+                        .setMessage("$line。撤销会回到那次改动之前的状态（这期间你手动改过的也会一起回去）。")
+                        .setPositiveButton("撤销") { _, _ ->
+                            val ok = AssistantUndo.restore(this@SettingsActivity)
+                            toast(if (ok) "已撤销" else "没有可撤销的改动")
+                            build()
+                        }
+                        .setNegativeButton("取消", null)
+                        .show()
+                }
+            }
             row("诊断", "抓取状态、解析结果，可导出原始页面") {
                 startActivity(Intent(this@SettingsActivity, DiagnosticsActivity::class.java))
             }

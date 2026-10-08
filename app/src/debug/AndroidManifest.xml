@@ -30,6 +30,10 @@
                 <action android:name="app.timetable.debug.PHOTOMGR" />
                 <action android:name="app.timetable.debug.AUTOCROPCHECK" />
                 <action android:name="app.timetable.debug.PICKFAKE" />
+                <action android:name="app.timetable.debug.ASSIST" />
+                <action android:name="app.timetable.debug.AIFAKE" />
+                <action android:name="app.timetable.debug.AIDUMP" />
+                <action android:name="app.timetable.debug.AICONFIG" />
                 <action android:name="app.timetable.debug.WIDGETSHOT" />
             </intent-filter>
         </receiver>

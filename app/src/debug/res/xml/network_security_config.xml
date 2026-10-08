@@ -2,8 +2,11 @@
 <!--
   debug 专用：与 release 保持同一条 jwk.lzu.edu.cn 放行规则（这样测 debug 就等于测 release
   的明文策略），额外再放行 10.0.2.2 —— 本机自测用的样本 HTTP 服务。
+  另外放行 127.0.0.1 / localhost：AI 助手的自检会在**App 进程内**起一个回环假服务
+  （见 debug 源码集的 FakeAssistantModel.kt），用来把 `ai/AssistantClient` 的真实
+  socket 链路跑一遍（Authorization 头、请求体、响应解析、401/402/429/500/超时的分支）。
   注意：一旦设置了 android:networkSecurityConfig，manifest 里的 usesCleartextTraffic 会被忽略，
-  所以这里必须显式写全。
+  所以这里必须显式写全。release 那份配置不受影响。
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false" />
@@ -11,5 +14,7 @@
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">jwk.lzu.edu.cn</domain>
         <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">localhost</domain>
     </domain-config>
 </network-security-config>
